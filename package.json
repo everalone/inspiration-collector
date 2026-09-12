@@ -1,0 +1,24 @@
+{
+  "name": "inspiration-collector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src-electron/main.mjs",
+  "scripts": {
+    "app": "electron .",
+    "ingest": "tsx cli.ts ingest",
+    "serve": "tsx cli.ts serve"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "cheerio": "^1.0.0",
+    "sharp": "^0.34.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^24.0.0",
+    "electron": "^44.3.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

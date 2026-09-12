@@ -1,0 +1,9 @@
+node_modules/
+dist/
+data/
+assets/
+.env
+.zcode/
+*.log
+.DS_Store
+Thumbs.db
