@@ -46,6 +46,8 @@ async function boot() {
     app.setPath("userData", userDataDir);
     // 数据写入用户目录（安装目录只读）
     process.env.INSPIRATION_DATA_DIR = userDataDir;
+    // 应用根目录（asar 内），供核心服务定位 viewer 静态文件
+    process.env.INSPIRATION_APP_ROOT = ROOT;
     // 支持把 .env 放在安装目录（exe 旁），便于打包版配置 key
     const exeEnv = path.join(path.dirname(app.getPath("exe")), ".env");
     if (fs.existsSync(exeEnv)) {

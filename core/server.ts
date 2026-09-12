@@ -6,7 +6,10 @@ import { ROOT_DIR, ASSETS_DIR, loadConfig } from "./config.js";
 import { listItems, countItems, getItem, updateItem, deleteItem, listArticles, typeCounts, getArticle, type ItemRow } from "./store.js";
 import { ingest } from "./ingest.js";
 
-const VIEWER_DIR = path.join(ROOT_DIR, "viewer");
+// viewer 静态目录：开发态在项目根；打包态在应用根（asar），由主进程通过环境变量注入
+const VIEWER_DIR = process.env.INSPIRATION_APP_ROOT
+  ? path.join(process.env.INSPIRATION_APP_ROOT, "viewer")
+  : path.join(ROOT_DIR, "viewer");
 
 /** 文章原图目录：兼容旧库存的 "assets\<id>" 与新库存的 "<id>" 两种 images_dir */
 function imagesDirOf(imagesDir: string): string {
