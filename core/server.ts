@@ -2,7 +2,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ROOT_DIR, ASSETS_DIR, loadConfig } from "./config.js";
+import { ROOT_DIR, ASSETS_DIR, loadConfig, saveConfig } from "./config.js";
 import { listItems, countItems, getItem, updateItem, deleteItem, listArticles, typeCounts, getArticle, type ItemRow } from "./store.js";
 import { ingest } from "./ingest.js";
 
@@ -53,6 +53,15 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
   if (!p.startsWith("/api/")) return false;
 
   if (req.method === "GET") {
+    if (p === "/api/config") {
+      const c = loadConfig();
+      return sendJson(res, 200, {
+        hasKey: !!c.apiKey,
+        keyMasked: c.apiKey ? c.apiKey.slice(0, 6) + "…" + c.apiKey.slice(-4) : "",
+        baseUrl: c.baseUrl,
+        model: c.model,
+      });
+    }
     if (p === "/api/crop") {
       const q = url.searchParams;
       const id = q.get("article") ?? "";
@@ -106,6 +115,21 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       return sendJson(res, 200, { images: files.map((f) => `/assets/${id}/${f}`) });
     }
     return sendJson(res, 404, { error: "unknown api" });
+  }
+
+  if (req.method === "POST" && p === "/api/config") {
+    const body = JSON.parse(await readBody(req)) as { apiKey?: string; baseUrl?: string; model?: string };
+    const patch: Record<string, string> = {};
+    if (typeof body.apiKey === "string") patch.apiKey = body.apiKey.trim();
+    if (typeof body.baseUrl === "string" && body.baseUrl.trim()) patch.baseUrl = body.baseUrl.trim().replace(/\/$/, "");
+    if (typeof body.model === "string" && body.model.trim()) patch.model = body.model.trim();
+    const saved = saveConfig(patch);
+    return sendJson(res, 200, {
+      hasKey: !!saved.apiKey,
+      keyMasked: saved.apiKey ? saved.apiKey.slice(0, 6) + "…" + saved.apiKey.slice(-4) : "",
+      baseUrl: saved.baseUrl,
+      model: saved.model,
+    });
   }
 
   if (req.method === "POST" && p === "/api/ingest") {

@@ -7,7 +7,7 @@
   "scripts": {
     "app": "electron .",
     "build:core": "tsc -p tsconfig.build.json",
-    "dist": "npm run build:core && electron-builder --win nsis",
+    "dist": "npm run build:core && electron-builder --win",
     "ingest": "tsx cli.ts ingest",
     "serve": "tsx cli.ts serve"
   },
@@ -24,13 +24,18 @@
       "package.json"
     ],
     "asarUnpack": [
-      "**/node_modules/better-sqlite3/**",
       "**/node_modules/sharp/**"
     ],
     "win": {
       "target": [
         {
           "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
           "arch": [
             "x64"
           ]
@@ -43,6 +48,9 @@
       "allowToChangeInstallationDirectory": true,
       "artifactName": "InspirationCollector-Setup-${version}.${ext}",
       "shortcutName": "灵感收集"
+    },
+    "portable": {
+      "artifactName": "InspirationCollector-Portable-${version}.${ext}"
     }
   },
   "dependencies": {

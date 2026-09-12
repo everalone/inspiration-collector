@@ -345,6 +345,50 @@ function closeModal() {
   modal.innerHTML = "";
 }
 
+/* ---------- 设置弹窗（API Key / Base URL / Model） ---------- */
+function openSettings() {
+  fetch("/api/config").then((r) => r.json()).then((c) => {
+    const modal = $("#modal");
+    modal.innerHTML = `<div class="modal">
+      <h3>⚙ 设置 · 模型服务</h3>
+      <label>API Key ${c.keyMasked ? `（当前 ${esc(c.keyMasked)}）` : "（必填）"}</label>
+      <input type="password" id="s-key" placeholder="sk-…" value="">
+      <label>Base URL</label>
+      <input type="text" id="s-base" value="${esc(c.baseUrl ?? "")}">
+      <label>模型</label>
+      <input type="text" id="s-model" value="${esc(c.model ?? "")}">
+      <div class="modal-hint">保存在本机配置文件中，不会上传。任何 OpenAI 兼容的多模态模型服务均可。</div>
+      <div class="modal-actions">
+        <span style="flex:1"></span>
+        <button class="btn" id="s-cancel">取消</button>
+        <button class="btn primary" id="s-save">保存</button>
+      </div>
+    </div>`;
+    modal.classList.remove("hidden");
+    $("#s-cancel").onclick = closeModal;
+    $("#s-save").onclick = saveSettings;
+    $("#s-key").focus();
+  });
+}
+
+async function saveSettings() {
+  const apiKey = $("#s-key").value.trim();
+  const baseUrl = $("#s-base").value.trim();
+  const model = $("#s-model").value.trim();
+  const patch = { baseUrl, model };
+  if (apiKey) patch.apiKey = apiKey;
+  const r = await fetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const saved = await r.json();
+  closeModal();
+  toast(saved.hasKey ? "已保存 ✔" : "已保存，但 API Key 为空");
+}
+
+$("#settings-btn").addEventListener("click", openSettings);
+
 async function saveModal(item) {
   const title = $("#f-title").value.trim();
   let payload;
@@ -533,4 +577,10 @@ async function doIngest() {
   }
 }
 
-loadBootstrap().then(loadItems);
+loadBootstrap().then(() => {
+  loadItems();
+  // 首次使用：未配置 key 时自动弹出设置
+  fetch("/api/config").then((r) => r.json()).then((c) => {
+    if (!c.hasKey) { openSettings(); toast("请先配置 API Key"); }
+  });
+});

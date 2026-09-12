@@ -24,17 +24,14 @@
 
 ## 安装
 
-从 [Releases](https://github.com/everalone/inspiration-collector/releases) 下载 `InspirationCollector-Setup-x.x.x.exe` 安装（Windows x64，未签名，首次运行可能提示 SmartScreen，选"仍要运行"）。
+从 [Releases](https://github.com/everalone/inspiration-collector/releases) 下载（Windows x64，未签名，SmartScreen 提示选"仍要运行"）：
 
-首次使用前配置 API key：在安装目录（`灵感收集.exe` 旁）放一个 `.env` 文件：
+- `InspirationCollector-Portable-x.x.x.exe`：**绿色单文件，双击即用**，无需安装；
+- `InspirationCollector-Setup-x.x.x.exe`：安装版，带开始菜单/桌面快捷方式，可选安装目录。
 
-```ini
-API_KEY=你的key
-BASE_URL=https://api.deepseek.com
-MODEL=deepseek-flash
-```
+两个版本数据互通（都存 `%AppData%\灵感收集\`）。
 
-任何 OpenAI 兼容的视觉模型均可（改 `BASE_URL` / `MODEL`，如智谱 `glm-4.6v` 等）。
+**首次使用**：启动后自动弹出设置（或点右上角 ⚙ 设置），填入 API Key 保存即可。默认用 DeepSeek（`deepseek-flash` 多模态，免费额度充足）；任何 OpenAI 兼容视觉模型均可，改 Base URL / Model 即可。配置保存在本机，不上传。
 
 ### 从源码运行
 
@@ -42,9 +39,8 @@ MODEL=deepseek-flash
 git clone https://github.com/everalone/inspiration-collector.git
 cd inspiration-collector
 npm install
-cp .env.example .env   # 填入 API_KEY
-npm run app            # 开发态桌面应用
-npm run dist           # 打包 NSIS 安装包（输出到 release/）
+npm run app     # 开发态桌面应用（key 在应用内 ⚙ 设置里填，或 cp .env.example .env）
+npm run dist    # 打包 Setup + Portable（输出到 release/）
 ```
 
 ## 使用

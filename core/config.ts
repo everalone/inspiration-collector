@@ -54,17 +54,17 @@ export function loadConfig(): Config {
       // 配置损坏时回退默认值
     }
   }
-  const merged = { ...DEFAULTS, ...file };
-  // 进程环境变量（打包版由 Electron 主进程从 exe 旁 .env 注入）
-  if (process.env.API_KEY) merged.apiKey = process.env.API_KEY;
-  if (process.env.BASE_URL) merged.baseUrl = process.env.BASE_URL;
-  if (process.env.MODEL) merged.model = process.env.MODEL;
-  // .env 文件优先：密钥等敏感信息走 .env，不入库
+  // 优先级：设置界面保存的 config.json > .env 文件 > 进程环境变量 > 默认值
   const env = loadDotEnv();
-  if (env.API_KEY) merged.apiKey = env.API_KEY;
-  if (env.BASE_URL) merged.baseUrl = env.BASE_URL;
-  if (env.MODEL) merged.model = env.MODEL;
-  return merged;
+  return {
+    ...DEFAULTS,
+    apiKey: file.apiKey || env.API_KEY || process.env.API_KEY || DEFAULTS.apiKey,
+    baseUrl: file.baseUrl || env.BASE_URL || process.env.BASE_URL || DEFAULTS.baseUrl,
+    model: file.model || env.MODEL || process.env.MODEL || DEFAULTS.model,
+    maxTokens: file.maxTokens ?? DEFAULTS.maxTokens,
+    serverPort: file.serverPort ?? DEFAULTS.serverPort,
+    seedTags: file.seedTags ?? DEFAULTS.seedTags,
+  };
 }
 
 export function saveConfig(patch: Partial<Config>): Config {
