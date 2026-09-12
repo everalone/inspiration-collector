@@ -6,18 +6,53 @@
   "main": "src-electron/main.mjs",
   "scripts": {
     "app": "electron .",
+    "build:core": "tsc -p tsconfig.build.json",
+    "dist": "npm run build:core && electron-builder --win nsis",
     "ingest": "tsx cli.ts ingest",
     "serve": "tsx cli.ts serve"
   },
+  "build": {
+    "appId": "com.p016.inspiration-collector",
+    "productName": "灵感收集",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "src-electron/**",
+      "viewer/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**",
+      "**/node_modules/sharp/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "src-electron/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "InspirationCollector-Setup-${version}.${ext}",
+      "shortcutName": "灵感收集"
+    }
+  },
   "dependencies": {
-    "better-sqlite3": "^12.2.0",
     "cheerio": "^1.0.0",
     "sharp": "^0.34.1"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^24.0.0",
     "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

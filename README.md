@@ -1,61 +1,73 @@
-# 灵感收集
+# 灵感收集 Inspiration Collector
 
-项目 ID：P016。登记信息见 `D:/workspace/INDEX.md`。
+把值得留存的微信公众号文章链接丢进来，自动抓取并用视觉大模型把内容**拆解成一张张"可复制的灵感卡片"**——配色（含色值）、网址、GitHub 项目、提示词、方法论笔记——形成可检索、可校验、可持续积累的本地灵感库。
 
-个人灵感收集工具：把值得留存的微信公众号文章链接复制下来，自动抓取、用视觉大模型把内容拆成一张张"可复制的卡片"（配色 / 网址 / 项目 / 提示词 / 笔记），形成可检索、可持续积累的本地灵感库。
+![screenshot](docs/screenshot-detail.png)
 
-**当前状态：MVP 已完成**（核心引擎 + 卡片墙 + Electron 桌面壳，已用 7 篇真实文章验收）。
+## 为什么做这个
 
-## 快速开始
+公众号好文（尤其设计/工具类）大多以图片形式排版，收藏等于进黑洞。灵感收集把"收藏"变成"拆解入库"：
 
-1. **配置 API key**：复制 `.env.example` 为 `.env`，填入你的 key（默认用 DeepSeek `deepseek-flash`，多模态；也可换任意 OpenAI 兼容视觉模型，改 `BASE_URL` + `MODEL`）。`.env` 与 `data/` 均已在 `.gitignore` 中，不会被提交。
-2. **启动应用**（推荐）：
-   ```
-   npm install
-   npm run app
-   ```
-   打开卡片墙窗口并常驻托盘，复制微信文章链接即自动收集（托盘菜单可关掉自动收集、设置开机自启）。
-3. **或仅启动网页版**：`npm run serve`，浏览器打开 http://127.0.0.1:5178 ，用页面顶部的粘贴框收集。
+- **配色方案** → 大色块 + `#十六进制`，点一下就复制，色值经原图像素采样校验；
+- **便利网址 / GitHub 项目** → 整条复制或直接打开，自动探活标记失效链接；
+- **提示词** → 全文逐字抄录，一键复制；
+- **方法论** → AI 整理成带目录的笔记，可复制为 Markdown；
+- 每张卡片保留**来源文章**和**图内定位裁剪图**（bbox），可对照原图核查修正。
 
-## 使用流程
+## 功能特性
 
-### 收集
-- 桌面：复制 `mp.weixin.qq.com/s/…` 链接 → 自动抓取 → 提取 → 系统通知报告结果（如"配色×54，笔记×1"）。
-- 手机：在手机微信里"复制链接" → 发给**文件传输助手** → 在电脑微信里打开并复制该链接 → 被自动收集。后续可考虑公众号转发接收等自动化方案（二期）。
-- 抓取被微信风控拦截时，兜底方案：浏览器打开文章 → 另存为 HTML → `npm run ingest -- --offline <html路径>`。
+- **一键收集**：复制 `mp.weixin.qq.com/s/…` 链接即自动抓取入库（桌面版剪贴板监听 + 系统通知），也可在界面粘贴框手动提交；兼容传统图文与新版"图片消息"（轮播图）两种页面格式。
+- **左列表 + 右详情**：列表按来源文章分组（父=文章及摘要，子=卡片），可折叠；详情页含定位裁剪图与全文轮播画廊，左右滑动查看原文所有插图。
+- **单层分类**：全部 / 配色 / 网址 / github / 提示词 / 笔记 / 待核对，加全局搜索与栏宽拖拽。
+- **校验闭环**：色值与原图像素比对（超阈值标"待核对"）、网址探活（404/域名不存在标"已失效"）、卡片可编辑删除。
+- **本地优先**：SQLite + 原图全部存本机，不上传任何数据。
 
-### 卡片墙（左列表 + 右详情）
-- 顶部一行是唯一的分类维度：全部 / 配色 / 网址 / github / 提示词 / 笔记 / 待核对，配合搜索框全局检索。
-- **左侧列表**：紧凑卡片（类型徽章 + 标题 + 内容预览），右下角直接"编辑 / 删除"，点卡片在右侧打开详情；**中间分隔条可拖拽调整两栏宽度**（自动记忆）。
-- **右侧详情**：完整内容 + **来源原图按卡片定位裁剪展示**（视觉模型提取时输出每张卡在图中的 bbox 区域，服务端按区域切图；点开可看完整原图对照）。配色卡大色块点一下复制 hex、"复制全部色值"、有原文说明则显示；网址卡点 URL 整条复制、探活状态显示；提示词卡全文一键复制；笔记卡目录芯片跳转、可复制为 Markdown。
-- **待核对**页签集中列出校验存疑的卡片（如色值与原图对不上），对照原图人工修正。
+## 安装
 
-### 数据都在本地
-- `data/inspiration.db`：SQLite，文章与卡片。
-- `data/raw/`：文章 HTML 缓存（重跑提取不重新抓）。
-- `assets/<文章id>/`：正文原图（bbox 裁剪的依据与人工对照兜底）。
-- `.env`：API key 等敏感配置（不入库）。
-- `data/config.json`：端口、种子标签等非敏感配置。
+从 [Releases](https://github.com/everalone/inspiration-collector/releases) 下载 `InspirationCollector-Setup-x.x.x.exe` 安装（Windows x64，未签名，首次运行可能提示 SmartScreen，选"仍要运行"）。
 
-## CLI
+首次使用前配置 API key：在安装目录（`灵感收集.exe` 旁）放一个 `.env` 文件：
 
-```
-npm run ingest -- <url>...      # 收集文章
-npm run ingest -- --offline <本地html路径>   # 风控兜底：解析本地另存的 HTML
-node cli.ts reprocess <文章id>  # 换模型/改提示词后重跑某篇提取
-node cli.ts checkurls           # 全库网址探活清扫（标记失效/域名不存在）
-node cli.ts list                # 列出已入库文章
-node cli.ts serve [--port=N]    # 启动卡片墙服务
-node cli.ts config [set k=v]    # 查看/修改配置
+```ini
+API_KEY=你的key
+BASE_URL=https://api.deepseek.com
+MODEL=deepseek-flash
 ```
 
-## 架构（core/ 与壳解耦）
+任何 OpenAI 兼容的视觉模型均可（改 `BASE_URL` / `MODEL`，如智谱 `glm-4.6v` 等）。
 
-抓取 `fetch.ts`（浏览器 UA、本地直连，兼容传统图文 `#js_content` 与新版图片消息 `picture_page_info_list` 两种页面格式）→ 解析 `parse.ts` → 视觉提取 `extract.ts`（deepseek-flash 多模态，严格 JSON schema 拆卡片，零证据不臆造）→ 校验 `verify.ts`（色卡像素采样比对原图、网址探活、ENOTFOUND 判编造）→ 存储 `store.ts`（SQLite）→ 卡片墙 `viewer/` + 服务 `server.ts`；Electron 壳 `src-electron/main.mjs`（窗口/托盘/剪贴板监听/通知）。
+### 从源码运行
 
-## 已知限制与后续方向
+```bash
+git clone https://github.com/everalone/inspiration-collector.git
+cd inspiration-collector
+npm install
+cp .env.example .env   # 填入 API_KEY
+npm run app            # 开发态桌面应用
+npm run dist           # 打包 NSIS 安装包（输出到 release/）
+```
 
-- 视觉提取对设计稿类图片（假浏览器地址栏里的概念域名）会忠实抄录，探活会标"已失效/域名不存在"，人工编辑兜底。
-- Electron 通过 `npx tsx` 子进程拉起核心服务，开发态运行方式；打包成安装包（electron-builder）是下一步。
-- 手机端自动入口（公众号转发接收）、跨设备同步、导出 Markdown/Notion，均为可选二期。
-- 提取质量依赖所选视觉模型；可换成更强模型重跑 `reprocess`。
+## 使用
+
+- **收集**：复制文章链接 → 自动抓取、下载正文图、视觉模型拆卡、校验、入库，完成弹通知。手机上刷到的文章：复制链接发微信"文件传输助手"→ 电脑上复制即可。
+- **卡片墙**：左侧列表点选卡片，右侧查看详情与来源原图；色块/网址/提示词点击即复制；笔记目录芯片跳转。
+- **编辑**：每张卡可改标题/色值/网址/内容，可删除；"待核对"页签集中处理存疑项。
+- **数据**：`%AppData%/灵感收集/` 下 `data/inspiration.db`（SQLite）与 `assets/`（正文原图），备份这两个目录即可迁移。
+
+## 工作原理
+
+```
+链接 → 抓取(本机直连, data-src/cdn_url 双格式解析)
+     → 视觉模型(严格 JSON schema 拆卡 + bbox 图内定位 + 防臆造规则)
+     → 校验(色值像素采样 / 网址探活)
+     → SQLite 入库
+     → 卡片墙(本机 http 服务 + Electron 壳)
+```
+
+核心引擎（`core/`）与壳（`src-electron/`）解耦：打包态由 Electron 内置 Node 进程内运行（SQLite 用 Node 内置 `node:sqlite`，无原生编译依赖）；开发态也可 `npm run serve` 纯网页使用。
+
+## 隐私
+
+- 文章数据、原图、数据库全部存本地；
+- 唯一外发请求是文章抓取（微信 CDN）与视觉模型 API 调用（发给你自己配置的模型服务商）；
+- 仓库不含任何密钥，`.env` / `data/` / `assets/` 均已 gitignore。

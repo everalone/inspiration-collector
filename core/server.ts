@@ -8,6 +8,12 @@ import { ingest } from "./ingest.js";
 
 const VIEWER_DIR = path.join(ROOT_DIR, "viewer");
 
+/** 文章原图目录：兼容旧库存的 "assets\<id>" 与新库存的 "<id>" 两种 images_dir */
+function imagesDirOf(imagesDir: string): string {
+  const rel = imagesDir.replace(/^assets[\\/]/, "");
+  return path.join(ASSETS_DIR, rel);
+}
+
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8",
@@ -50,7 +56,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       const idx = Number(q.get("idx") ?? 0);
       const box = ["x1", "y1", "x2", "y2"].map((k) => Number(q.get(k)));
       const a = getArticle(id);
-      const dir = a?.images_dir ? path.join(ROOT_DIR, a.images_dir) : "";
+      const dir = a?.images_dir ? imagesDirOf(a.images_dir) : "";
       const files = dir && fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [];
       const file = files[idx];
       if (!a || !file || box.some((n) => !Number.isFinite(n))) {
@@ -92,7 +98,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     if (p === "/api/article-images") {
       const id = url.searchParams.get("id") ?? "";
       const a = getArticle(id);
-      const dir = a?.images_dir ? path.join(ROOT_DIR, a.images_dir) : "";
+      const dir = a?.images_dir ? imagesDirOf(a.images_dir) : "";
       const files = dir && fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [];
       return sendJson(res, 200, { images: files.map((f) => `/assets/${id}/${f}`) });
     }
@@ -127,7 +133,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
 }
 
 export function startServer(port: number): Promise<void> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? "/", `http://localhost:${port}`);
       try {
@@ -147,6 +153,7 @@ export function startServer(port: number): Promise<void> {
         sendJson(res, 500, { error: (e as Error).message });
       }
     });
+    server.on("error", reject);
     server.listen(port, "127.0.0.1", () => {
       console.log(`卡片墙已启动: http://127.0.0.1:${port}`);
       resolve();

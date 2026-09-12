@@ -1,5 +1,6 @@
 import { app, BrowserWindow, Tray, Menu, clipboard, Notification, nativeImage } from "electron";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,6 +17,8 @@ const startHidden = process.argv.includes("--hidden");
 let tray = null;
 let win = null;
 let serverProc = null;
+let serverMode = "none"; // in-process | child-process | external | none
+let lastCoreError = null;
 let lastClipboard = "";
 let autoCollect = true;
 let ingesting = false;
@@ -37,10 +40,25 @@ function showWindow() {
 
 async function boot() {
   try {
-    startServer();
+    // 数据目录固定为 %AppData%/灵感收集（Electron 默认用 package.json 的 name，重装/改名也不变）
+    const userDataDir = path.join(app.getPath("appData"), "灵感收集");
+    fs.mkdirSync(userDataDir, { recursive: true });
+    app.setPath("userData", userDataDir);
+    // 数据写入用户目录（安装目录只读）
+    process.env.INSPIRATION_DATA_DIR = userDataDir;
+    // 支持把 .env 放在安装目录（exe 旁），便于打包版配置 key
+    const exeEnv = path.join(path.dirname(app.getPath("exe")), ".env");
+    if (fs.existsSync(exeEnv)) {
+      for (const line of fs.readFileSync(exeEnv, "utf8").split(/\r?\n/)) {
+        if (line.trim().startsWith("#")) continue;
+        const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+        if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim();
+      }
+    }
+    await startCore();
     const ok = await waitForServer();
     if (!ok) {
-      dialogError("核心服务启动失败，请检查 Node 环境后重试。");
+      dialogError(`核心服务启动失败${lastCoreError ? "：" + String(lastCoreError).slice(0, 80) : ""}，请重新安装或反馈日志。`);
       app.quit();
       return;
     }
@@ -54,19 +72,36 @@ async function boot() {
   }
 }
 
-function startServer() {
+async function startCore() {
+  // 打包态：dist 已随包发布，直接用 Electron 内置 Node 跑核心服务
+  try {
+    const { startServer } = await import("../dist/core/server.js");
+    await startServer(PORT);
+    serverMode = "in-process";
+    return;
+  } catch (e) {
+    if (String(e).includes("EADDRINUSE")) {
+      // 端口已被占（多为已有实例在跑），直接复用
+      serverMode = "external";
+      return;
+    }
+    // dist 缺失或损坏 → 开发态回退到 tsx 子进程
+    lastCoreError = e;
+  }
   serverProc = spawn("npx", ["tsx", "cli.ts", "serve"], {
     cwd: ROOT,
     stdio: "ignore",
     windowsHide: true,
     shell: process.platform === "win32", // Windows 上 npx 是 .cmd，必须走 shell
   });
+  serverMode = "child-process";
   serverProc.on("exit", () => {
     serverProc = null;
   });
 }
 
 function stopServer() {
+  if (serverMode !== "child-process") return; // 进程内服务随应用退出，无需处理
   if (!serverProc) return;
   if (process.platform === "win32" && serverProc.pid) {
     spawn("taskkill", ["/T", "/F", "/PID", String(serverProc.pid)], { windowsHide: true });

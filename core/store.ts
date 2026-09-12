@@ -1,4 +1,4 @@
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { DB_PATH, DATA_DIR } from "./config.js";
@@ -36,13 +36,13 @@ export interface ItemRow {
   edited: number;
 }
 
-let db: Database.Database | null = null;
+let db: DatabaseSync | null = null;
 
-export function getDb(): Database.Database {
+export function getDb(): DatabaseSync {
   if (db) return db;
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  db = new Database(DB_PATH);
-  db.pragma("journal_mode = WAL");
+  db = new DatabaseSync(DB_PATH);
+  db.exec("PRAGMA journal_mode = WAL;");
   db.exec(`
     CREATE TABLE IF NOT EXISTS articles (
       id TEXT PRIMARY KEY,
@@ -91,29 +91,26 @@ export function upsertArticle(a: {
   description: string; summary?: string; articleType?: string; tags?: string[];
   imagesDir?: string; status?: string; error?: string; processed?: boolean;
 }): void {
-  const d = getDb();
-  d.prepare(`
+  getDb().prepare(`
     INSERT INTO articles (id, url, title, account, publish_date, description, summary, article_type, tags, images_dir, status, error, fetched_at, processed_at)
-    VALUES (@id, @url, @title, @account, @publish_date, @description, @summary, @article_type, @tags, @images_dir, @status, @error, @fetched_at, @processed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       title=excluded.title, account=excluded.account, publish_date=excluded.publish_date,
       description=excluded.description, summary=excluded.summary, article_type=excluded.article_type,
       tags=excluded.tags, images_dir=excluded.images_dir, status=excluded.status, error=excluded.error,
       processed_at=COALESCE(excluded.processed_at, articles.processed_at)
-  `).run({
-    id: a.id, url: a.url, title: a.title, account: a.account,
-    publish_date: a.publishDate, description: a.description,
-    summary: a.summary ?? "", article_type: a.articleType ?? "",
-    tags: JSON.stringify(a.tags ?? []), images_dir: a.imagesDir ?? "",
-    status: a.status ?? "ok", error: a.error ?? "",
-    fetched_at: new Date().toISOString(),
-    processed_at: a.processed ? new Date().toISOString() : null,
-  });
+  `).run(
+    a.id, a.url, a.title, a.account, a.publishDate, a.description,
+    a.summary ?? "", a.articleType ?? "", JSON.stringify(a.tags ?? []),
+    a.imagesDir ?? "", a.status ?? "ok", a.error ?? "",
+    new Date().toISOString(), a.processed ? new Date().toISOString() : null
+  );
 }
 
 export function replaceItems(articleId: string, items: ExtractedItem[], verifyResults: Map<string, { status: string; detail: unknown }>, articleTags: string[] = []): number {
   const d = getDb();
-  const tx = d.transaction(() => {
+  d.exec("BEGIN");
+  try {
     d.prepare("DELETE FROM items WHERE article_id = ?").run(articleId);
     const ins = d.prepare(`
       INSERT INTO items (id, article_id, type, title, payload, tags, verify_status, verify_detail, source_image_index, bbox, created_at, edited)
@@ -130,8 +127,11 @@ export function replaceItems(articleId: string, items: ExtractedItem[], verifyRe
         it.bbox?.length === 4 ? JSON.stringify(it.bbox) : "", now
       );
     }
-  });
-  tx();
+    d.exec("COMMIT");
+  } catch (e) {
+    d.exec("ROLLBACK");
+    throw e;
+  }
   return items.length;
 }
 
@@ -142,13 +142,14 @@ function itemKey(it: ExtractedItem): string {
 export function updateItem(id: string, patch: { title?: string; payload?: unknown; tags?: string[]; verifyStatus?: string; verifyDetail?: unknown }): void {
   const d = getDb();
   const sets: string[] = ["edited = 1"];
-  const vals: Record<string, unknown> = { id };
-  if (patch.title !== undefined) { sets.push("title = @title"); vals.title = patch.title; }
-  if (patch.payload !== undefined) { sets.push("payload = @payload"); vals.payload = JSON.stringify(patch.payload); }
-  if (patch.tags !== undefined) { sets.push("tags = @tags"); vals.tags = JSON.stringify(patch.tags); }
-  if (patch.verifyStatus !== undefined) { sets.push("verify_status = @vs"); vals.vs = patch.verifyStatus; }
-  if (patch.verifyDetail !== undefined) { sets.push("verify_detail = @vd"); vals.vd = JSON.stringify(patch.verifyDetail); }
-  d.prepare(`UPDATE items SET ${sets.join(", ")} WHERE id = @id`).run(vals);
+  const vals: string[] = [];
+  if (patch.title !== undefined) { sets.push("title = ?"); vals.push(patch.title); }
+  if (patch.payload !== undefined) { sets.push("payload = ?"); vals.push(JSON.stringify(patch.payload)); }
+  if (patch.tags !== undefined) { sets.push("tags = ?"); vals.push(JSON.stringify(patch.tags)); }
+  if (patch.verifyStatus !== undefined) { sets.push("verify_status = ?"); vals.push(patch.verifyStatus); }
+  if (patch.verifyDetail !== undefined) { sets.push("verify_detail = ?"); vals.push(JSON.stringify(patch.verifyDetail)); }
+  vals.push(id);
+  d.prepare(`UPDATE items SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
 }
 
 export function deleteItem(id: string): void {
@@ -164,33 +165,30 @@ export interface ItemFilter {
   offset?: number;
 }
 
-export function listItems(f: ItemFilter = {}): ItemRow[] {
-  const d = getDb();
+function buildWhere(f: ItemFilter): { sql: string; vals: string[] } {
   const where: string[] = [];
-  const vals: Record<string, unknown> = {};
-  if (f.type && f.type !== "all") { where.push("type = @type"); vals.type = f.type; }
-  if (f.verify) { where.push("verify_status = @verify"); vals.verify = f.verify; }
-  if (f.tag) { where.push("tags LIKE @tag"); vals.tag = `%"${f.tag}"%`; }
+  const vals: string[] = [];
+  if (f.type && f.type !== "all") { where.push("type = ?"); vals.push(f.type); }
+  if (f.verify) { where.push("verify_status = ?"); vals.push(f.verify); }
+  if (f.tag) { where.push("tags LIKE ?"); vals.push(`%"${f.tag}"%`); }
   if (f.q) {
-    where.push("(title LIKE @q OR payload LIKE @q OR tags LIKE @q OR article_id IN (SELECT id FROM articles WHERE title LIKE @q OR account LIKE @q))");
-    vals.q = `%${f.q}%`;
+    where.push("(title LIKE ? OR payload LIKE ? OR tags LIKE ? OR article_id IN (SELECT id FROM articles WHERE title LIKE ? OR account LIKE ?))");
+    const like = `%${f.q}%`;
+    vals.push(like, like, like, like, like);
   }
-  const sql = `SELECT * FROM items ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY created_at DESC, article_id DESC LIMIT @limit OFFSET @offset`;
-  return d.prepare(sql).all({ limit: f.limit ?? 500, offset: f.offset ?? 0, ...vals }) as ItemRow[];
+  return { sql: where.length ? "WHERE " + where.join(" AND ") : "", vals };
+}
+
+export function listItems(f: ItemFilter = {}): ItemRow[] {
+  const { sql, vals } = buildWhere(f);
+  return getDb()
+    .prepare(`SELECT * FROM items ${sql} ORDER BY created_at DESC, article_id DESC LIMIT ? OFFSET ?`)
+    .all(...vals, f.limit ?? 500, f.offset ?? 0) as unknown as ItemRow[];
 }
 
 export function countItems(f: ItemFilter = {}): number {
-  const d = getDb();
-  const where: string[] = [];
-  const vals: Record<string, unknown> = {};
-  if (f.type && f.type !== "all") { where.push("type = @type"); vals.type = f.type; }
-  if (f.verify) { where.push("verify_status = @verify"); vals.verify = f.verify; }
-  if (f.tag) { where.push("tags LIKE @tag"); vals.tag = `%"${f.tag}"%`; }
-  if (f.q) {
-    where.push("(title LIKE @q OR payload LIKE @q OR tags LIKE @q OR article_id IN (SELECT id FROM articles WHERE title LIKE @q OR account LIKE @q))");
-    vals.q = `%${f.q}%`;
-  }
-  return (d.prepare(`SELECT COUNT(*) AS c FROM items ${where.length ? "WHERE " + where.join(" AND ") : ""}`).get(vals) as { c: number }).c;
+  const { sql, vals } = buildWhere(f);
+  return (getDb().prepare(`SELECT COUNT(*) AS c FROM items ${sql}`).get(...vals) as { c: number }).c;
 }
 
 export function getItem(id: string): ItemRow | undefined {
@@ -198,7 +196,7 @@ export function getItem(id: string): ItemRow | undefined {
 }
 
 export function listArticles(): ArticleRow[] {
-  return getDb().prepare("SELECT * FROM articles ORDER BY fetched_at DESC").all() as ArticleRow[];
+  return getDb().prepare("SELECT * FROM articles ORDER BY fetched_at DESC").all() as unknown as ArticleRow[];
 }
 
 export function getArticle(id: string): ArticleRow | undefined {

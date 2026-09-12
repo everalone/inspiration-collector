@@ -92,7 +92,7 @@ export async function ingest(url: string, opts: { offline?: boolean } = {}): Pro
     id: meta.id, url: meta.url, title: meta.title, account: meta.account,
     publishDate: meta.publishDate, description: meta.description,
     summary: extraction.articleSummary, articleType: extraction.articleType,
-    tags: extraction.tags, imagesDir: path.relative(process.cwd(), imagesDir),
+    tags: extraction.tags, imagesDir: meta.id, // assets 内的相对目录，可移植
     status: "ok", processed: true,
   });
   replaceItems(meta.id, extraction.items, verifyResults);
