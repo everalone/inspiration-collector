@@ -3,7 +3,14 @@
 项目 ID：P016
 更新日期：2026-09-12
 
-MVP 已完成并经真实数据验收。项目目的见 `README.md`（含完整使用说明）。
+MVP 已完成并经真实数据验收，代码已开源：https://github.com/everalone/inspiration-collector （API key 走本地 `.env`，不入库）。项目目的见 `README.md`（含完整使用说明）。
+
+## 2026-09-12 四次修订（分组 + 画廊 + 上传）
+
+- **列表按文章分组**：父级 = 微信链接（标题 + 公众号 + AI 摘要，可折叠），子级 = 该文出的所有卡片，一眼看清每张卡出自哪篇。
+- **详情页全文轮播画廊**：卡片定位裁剪图之下附文章全部轮播图，左右箭头/键盘切换 + 计数器 + 点击放大，截取不准时可自行翻看。
+- **配置安全化**：API key 从 data/config.json 迁移到 `.env`（gitignore），仓库内只放 `.env.example` 模板。
+- 梳理：移除 bootstrap tags 字段、allTags() 等死代码；.gitignore 修正（assets/、.zcode/）。
 
 ## 已完成（2026-09-12）
 
