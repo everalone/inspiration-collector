@@ -69,7 +69,11 @@ async function main() {
           patch[k] = k === "seedTags" ? v.split(",") : (k === "serverPort" ? Number(v) : v);
         }
         const c = saveConfig(patch);
-        console.log("已保存:", { ...c, apiKey: c.apiKey ? c.apiKey.slice(0, 6) + "…" : "" });
+        console.log("已保存:", {
+          ...c,
+          apiKey: c.apiKey ? c.apiKey.slice(0, 6) + "…" : "",
+          inboxToken: c.inboxToken ? c.inboxToken.slice(0, 4) + "…" : "",
+        });
       } else {
         const c = loadConfig();
         console.log({
