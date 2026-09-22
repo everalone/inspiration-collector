@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ROOT_DIR, ASSETS_DIR, loadConfig, saveConfig } from "./config.js";
 import { listItems, countItems, getItem, updateItem, deleteItem, listArticles, typeCounts, getArticle, type ItemRow } from "./store.js";
-import { ingest } from "./ingest.js";
+import { ingest, reprocess } from "./ingest.js";
 
 // viewer 静态目录：开发态在项目根；打包态在应用根（asar），由主进程通过环境变量注入
 const VIEWER_DIR = process.env.INSPIRATION_APP_ROOT
@@ -141,6 +141,25 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     } catch (e) {
       return sendJson(res, 500, { error: (e as Error).message });
     }
+  }
+
+  if (req.method === "POST" && p === "/api/articles/reprocess") {
+    const body = JSON.parse(await readBody(req)) as { ids?: string[] };
+    const ids = Array.isArray(body.ids) ? body.ids.filter((x) => typeof x === "string" && x) : [];
+    if (!ids.length) return sendJson(res, 400, { error: "请选择要重跑的文章" });
+    const results: {
+      id: string; ok: boolean; title?: string;
+      counts?: Record<string, number>; error?: string;
+    }[] = [];
+    for (const id of ids) {
+      try {
+        const r = await reprocess(id);
+        results.push({ id, ok: true, title: r.title, counts: r.counts });
+      } catch (e) {
+        results.push({ id, ok: false, error: (e as Error).message });
+      }
+    }
+    return sendJson(res, 200, { results });
   }
 
   const m = p.match(/^\/api\/items\/([\w-]+)$/);

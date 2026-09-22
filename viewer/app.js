@@ -148,6 +148,7 @@ function renderList() {
               <div class="group-sub">${esc(sub)}</div>
               ${g.article?.summary ? `<div class="group-sum">${esc(g.article.summary)}</div>` : ""}
             </div>
+            <button type="button" class="btn rep-one" data-rep="${esc(g.id)}" title="重新提取本篇" style="margin-left:8px;flex-shrink:0">重跑</button>
           </div>
           ${isCollapsed ? "" : `<div class="group-items">${g.items.map(itemHtml).join("")}</div>`}
         </div>`;
@@ -345,11 +346,20 @@ function closeModal() {
   modal.innerHTML = "";
 }
 
-/* ---------- 设置弹窗（API Key / Base URL / Model） ---------- */
+/* ---------- 设置弹窗（API Key / Base URL / Model + 重跑提取） ---------- */
 function openSettings() {
-  fetch("/api/config").then((r) => r.json()).then((c) => {
-    const modal = $("#modal");
-    modal.innerHTML = `<div class="modal">
+  Promise.all([fetch("/api/config").then((r) => r.json()), fetch("/api/articles").then((r) => r.json())]).then(
+    ([c, articles]) => {
+      const modal = $("#modal");
+      const rows = (Array.isArray(articles) ? articles : [])
+        .map(
+          (a) => `<label class="rep-row" style="display:flex;gap:8px;align-items:flex-start;font-weight:400;margin:4px 0">
+          <input type="checkbox" class="rep-check" data-id="${esc(a.id)}" style="margin-top:4px">
+          <span style="flex:1">${esc(a.title || a.id)}<span style="opacity:.6"> · ${esc(a.account || "")}</span></span>
+        </label>`
+        )
+        .join("");
+      modal.innerHTML = `<div class="modal">
       <h3>⚙ 设置 · 模型服务</h3>
       <label>API Key ${c.keyMasked ? `（当前 ${esc(c.keyMasked)}）` : "（必填）"}</label>
       <input type="password" id="s-key" placeholder="sk-…" value="">
@@ -358,17 +368,82 @@ function openSettings() {
       <label>模型</label>
       <input type="text" id="s-model" value="${esc(c.model ?? "")}">
       <div class="modal-hint">保存在本机配置文件中，不会上传。任何 OpenAI 兼容的多模态模型服务均可。</div>
+      <h3 style="margin-top:18px">重跑提取</h3>
+      <div class="modal-hint">换模型后可对旧文章重新拆卡。将<strong>整篇替换</strong>该文全部卡片（含手改），需在线重抓原文。</div>
+      <div style="max-height:180px;overflow:auto;border:1px solid var(--border,#ddd);border-radius:8px;padding:8px;margin-top:8px">
+        ${rows || `<div class="empty">暂无文章</div>`}
+      </div>
       <div class="modal-actions">
+        <button class="btn" id="rep-select-all" type="button">全选</button>
         <span style="flex:1"></span>
         <button class="btn" id="s-cancel">取消</button>
+        <button class="btn" id="rep-run" type="button">重跑选中</button>
         <button class="btn primary" id="s-save">保存</button>
       </div>
     </div>`;
-    modal.classList.remove("hidden");
-    $("#s-cancel").onclick = closeModal;
-    $("#s-save").onclick = saveSettings;
-    $("#s-key").focus();
-  });
+      modal.classList.remove("hidden");
+      $("#s-cancel").onclick = closeModal;
+      $("#s-save").onclick = saveSettings;
+      $("#rep-select-all").onclick = () => {
+        const boxes = [...document.querySelectorAll(".rep-check")];
+        const all = boxes.every((b) => b.checked);
+        boxes.forEach((b) => (b.checked = !all));
+      };
+      $("#rep-run").onclick = () => {
+        const ids = [...document.querySelectorAll(".rep-check:checked")].map((b) => b.dataset.id);
+        void confirmAndReprocess(ids);
+      };
+      $("#s-key").focus();
+    }
+  );
+}
+
+async function confirmAndReprocess(ids) {
+  if (!ids.length) {
+    toast("请先勾选文章");
+    return;
+  }
+  let cardN = 0;
+  try {
+    const arts = await fetch("/api/articles").then((r) => r.json());
+    const map = new Map((Array.isArray(arts) ? arts : []).map((a) => [a.id, a.itemCount ?? 0]));
+    cardN = ids.reduce((s, id) => s + (map.get(id) || 0), 0);
+  } catch {
+    cardN = 0;
+  }
+  const msg =
+    ids.length === 1
+      ? `将删除该文现有 ${cardN} 张卡片并重新提取，手动修改会丢失。确定重跑？`
+      : `将删除所选 ${ids.length} 篇文章的现有 ${cardN} 张卡片并重新提取，手动修改会丢失。确定重跑？`;
+  if (!confirm(msg)) return;
+  let ok = 0,
+    fail = 0;
+  for (let i = 0; i < ids.length; i++) {
+    toast(`重跑中 ${i + 1}/${ids.length}…`);
+    try {
+      const r = await fetch("/api/articles/reprocess", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: [ids[i]] }),
+      });
+      const data = await r.json();
+      const one = data.results?.[0];
+      if (r.ok && one?.ok) {
+        ok++;
+        toast(`✔ ${one.title || ids[i]}（${i + 1}/${ids.length}）`);
+      } else {
+        fail++;
+        toast(`✘ ${one?.error || data.error || "失败"}（${i + 1}/${ids.length}）`);
+      }
+    } catch (e) {
+      fail++;
+      toast(`✘ ${e.message || "失败"}（${i + 1}/${ids.length}）`);
+    }
+  }
+  toast(fail ? `完成：成功 ${ok}，失败 ${fail}` : `重跑完成：${ok} 篇 ✔`);
+  imgCache.clear();
+  await loadBootstrap();
+  await loadItems();
 }
 
 async function saveSettings() {
@@ -451,6 +526,12 @@ document.addEventListener("click", async (e) => {
   if (t.closest("#gallery-img")) {
     $("#lightbox-img").src = t.src;
     $("#lightbox").classList.remove("hidden");
+    return;
+  }
+  const repOne = t.closest("[data-rep]");
+  if (repOne) {
+    e.stopPropagation();
+    await confirmAndReprocess([repOne.dataset.rep]);
     return;
   }
   const ghead = t.closest("[data-gtoggle]");

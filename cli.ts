@@ -26,8 +26,13 @@ async function main() {
     }
     case "reprocess": {
       for (const id of rest) {
-        const r = await reprocess(id);
-        console.log(`✔ ${r.title}: ${JSON.stringify(r.counts)}`);
+        try {
+          const r = await reprocess(id);
+          console.log(`✔ ${r.title}: ${JSON.stringify(r.counts)}`);
+        } catch (e) {
+          console.error(`✘ ${id}: ${(e as Error).message}`);
+          process.exitCode = 1;
+        }
       }
       break;
     }

@@ -195,8 +195,13 @@ export function getItem(id: string): ItemRow | undefined {
   return getDb().prepare("SELECT * FROM items WHERE id = ?").get(id) as ItemRow | undefined;
 }
 
-export function listArticles(): ArticleRow[] {
-  return getDb().prepare("SELECT * FROM articles ORDER BY fetched_at DESC").all() as unknown as ArticleRow[];
+export function listArticles(): (ArticleRow & { itemCount: number })[] {
+  return getDb()
+    .prepare(
+      `SELECT a.*, (SELECT COUNT(*) FROM items i WHERE i.article_id = a.id) AS itemCount
+       FROM articles a ORDER BY fetched_at DESC`
+    )
+    .all() as unknown as (ArticleRow & { itemCount: number })[];
 }
 
 export function getArticle(id: string): ArticleRow | undefined {

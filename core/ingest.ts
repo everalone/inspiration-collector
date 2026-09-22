@@ -19,31 +19,30 @@ export interface IngestResult {
   items: { type: string; title: string; detail: string }[];
 }
 
-export async function ingest(url: string, opts: { offline?: boolean } = {}): Promise<IngestResult> {
+export async function ingest(
+  url: string,
+  opts: { offline?: boolean; refresh?: boolean } = {},
+): Promise<IngestResult> {
   const articleId = articleIdFromUrl(url);
 
-  // 1. HTML：离线缓存优先，否则抓取
+  // 1. HTML：离线缓存优先，否则抓取；refresh 强制在线重抓（reprocess）。成功入库后再写 raw 缓存。
   let html: string;
+  let freshHtml: string | null = null;
+  const cachePath = path.join(RAW_DIR, `${articleId}.html`);
   if (opts.offline && !url.startsWith("http")) {
     html = fs.readFileSync(url, "utf8"); // offline 模式 url 传本地 html 路径
   } else {
     fs.mkdirSync(RAW_DIR, { recursive: true });
-    const cachePath = path.join(RAW_DIR, `${articleId}.html`);
-    if (fs.existsSync(cachePath)) {
-      html = fs.readFileSync(cachePath, "utf8");
+    if (opts.refresh || !fs.existsSync(cachePath)) {
+      freshHtml = await fetchHtml(url); // 失败向上抛，不改库
+      html = freshHtml;
     } else {
-      html = await fetchHtml(url);
-      fs.writeFileSync(cachePath, html, "utf8");
+      html = fs.readFileSync(cachePath, "utf8");
     }
   }
 
-  // 2. 解析
+  // 2. 解析（元数据与卡片均在提取成功后才写入，失败不改库）
   const meta = parseArticle(html, url.startsWith("http") ? url : `https://mp.weixin.qq.com/s/${articleId}`);
-  upsertArticle({
-    id: meta.id, url: meta.url, title: meta.title, account: meta.account,
-    publishDate: meta.publishDate, description: meta.description,
-    status: "ok",
-  });
 
   // 3. 下载正文图片
   const imagesDir = path.join(ASSETS_DIR, meta.id);
@@ -96,6 +95,7 @@ export async function ingest(url: string, opts: { offline?: boolean } = {}): Pro
     status: "ok", processed: true,
   });
   replaceItems(meta.id, extraction.items, verifyResults);
+  if (freshHtml !== null) fs.writeFileSync(cachePath, freshHtml, "utf8");
 
   const counts: Record<string, number> = {};
   for (const it of extraction.items) counts[it.type] = (counts[it.type] ?? 0) + 1;
@@ -117,9 +117,9 @@ function keyOf(it: { type: string; title: string; payload?: unknown }): string {
   return JSON.stringify([it.type, it.title, it.payload]);
 }
 
-/** 重新处理已入库文章（例如换模型后重跑提取） */
+/** 重新处理已入库文章（例如换模型后重跑提取）：强制在线重抓，失败不改库 */
 export async function reprocess(articleId: string): Promise<IngestResult> {
   const a = getArticle(articleId);
   if (!a) throw new Error(`文章不存在: ${articleId}`);
-  return ingest(a.url);
+  return ingest(a.url, { refresh: true });
 }

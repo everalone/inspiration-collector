@@ -43,6 +43,17 @@ npm run app     # 开发态桌面应用（key 在应用内 ⚙ 设置里填，�
 npm run dist    # 打包 Setup + Portable（输出到 release/）
 ```
 
+### 发版（维护者）
+
+推送形如 `v0.2.0` 的标签后，GitHub Actions 在 Windows 构建并自动创建 Release（Setup + Portable + `latest.yml`）。标签版本必须与 `package.json` 的 `version` 一致，否则流水线失败。
+
+```bash
+# 1. 改 package.json 的 version，例如 0.2.0，提交并推到 main
+# 2. 打同名标签并推送
+git tag v0.2.0
+git push origin main --tags
+```
+
 ## 使用
 
 - **收集**：复制文章链接 → 自动抓取、下载正文图、视觉模型拆卡、校验、入库，完成弹通知。手机上刷到的文章：复制链接发微信"文件传输助手"→ 电脑上复制即可。
