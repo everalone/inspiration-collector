@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ROOT_DIR, ASSETS_DIR, loadConfig, saveConfig } from "./config.js";
-import { listItems, countItems, getItem, updateItem, deleteItem, listArticles, typeCounts, getArticle, type ItemRow } from "./store.js";
+import { listItems, countItems, getItem, updateItem, deleteItem, deleteArticle, listArticles, typeCounts, getArticle, type ItemRow } from "./store.js";
 import { ingest, reprocess } from "./ingest.js";
 
 // viewer 静态目录：开发态在项目根；打包态在应用根（asar），由主进程通过环境变量注入
@@ -174,6 +174,12 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       deleteItem(id);
       return sendJson(res, 200, { ok: true });
     }
+  }
+
+  const am = p.match(/^\/api\/articles\/([\w-]+)$/);
+  if (am && req.method === "DELETE") {
+    deleteArticle(am[1]);
+    return sendJson(res, 200, { ok: true });
   }
   return sendJson(res, 404, { error: "unknown api" });
 }

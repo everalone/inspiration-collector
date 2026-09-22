@@ -156,6 +156,13 @@ export function deleteItem(id: string): void {
   getDb().prepare("DELETE FROM items WHERE id = ?").run(id);
 }
 
+/** 删除文章及其全部卡片 */
+export function deleteArticle(articleId: string): void {
+  const d = getDb();
+  d.prepare("DELETE FROM items WHERE article_id = ?").run(articleId);
+  d.prepare("DELETE FROM articles WHERE id = ?").run(articleId);
+}
+
 export interface ItemFilter {
   type?: string;
   tag?: string;

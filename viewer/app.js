@@ -141,14 +141,13 @@ function renderList() {
         const isCollapsed = collapsedGroups.has(g.id);
         const sub = [g.article?.account, `${g.items.length} 张卡片`].filter(Boolean).join(" · ");
         return `<div class="group">
-          <div class="group-head" data-gtoggle="${esc(g.id)}" title="${esc(g.article?.summary || g.article?.title || "")}">
+          <div class="group-head" data-gtoggle="${esc(g.id)}" data-article="${esc(g.id)}" title="${esc(g.article?.summary || g.article?.title || "")}">
             <span class="caret ${isCollapsed ? "closed" : ""}">▾</span>
             <div class="group-texts">
               <div class="group-title">${esc(g.article?.title ?? "未知来源")}</div>
               <div class="group-sub">${esc(sub)}</div>
               ${g.article?.summary ? `<div class="group-sum">${esc(g.article.summary)}</div>` : ""}
             </div>
-            <button type="button" class="btn rep-one" data-rep="${esc(g.id)}" title="重新提取本篇" style="margin-left:8px;flex-shrink:0">重跑</button>
           </div>
           ${isCollapsed ? "" : `<div class="group-items">${g.items.map(itemHtml).join("")}</div>`}
         </div>`;
@@ -446,6 +445,71 @@ async function confirmAndReprocess(ids) {
   await loadItems();
 }
 
+/* ---------- 文章右键菜单：重跑 / 删除 ---------- */
+function closeArticleMenu() {
+  $("#article-menu")?.remove();
+}
+
+async function confirmDeleteArticle(articleId) {
+  let cardN = 0;
+  let title = articleId;
+  try {
+    const arts = await fetch("/api/articles").then((r) => r.json());
+    const a = (Array.isArray(arts) ? arts : []).find((x) => x.id === articleId);
+    cardN = a?.itemCount ?? 0;
+    title = a?.title || articleId;
+  } catch {
+    /* 用默认文案 */
+  }
+  if (!confirm(`将删除「${title}」的全部 ${cardN} 张卡片及文章记录，不可恢复。确定删除？`)) return;
+  try {
+    const r = await fetch(`/api/articles/${encodeURIComponent(articleId)}`, { method: "DELETE" });
+    const data = await r.json();
+    if (!r.ok) {
+      toast(data.error || "删除失败");
+      return;
+    }
+    toast("已删除该篇全部内容");
+    imgCache.clear();
+    await loadBootstrap();
+    await loadItems();
+  } catch (e) {
+    toast(e.message || "删除失败");
+  }
+}
+
+document.addEventListener("contextmenu", (e) => {
+  closeArticleMenu();
+  const head = e.target.closest?.("[data-article]");
+  if (!head) return;
+  e.preventDefault();
+  const id = head.dataset.article;
+  const menu = document.createElement("div");
+  menu.id = "article-menu";
+  menu.style.cssText = `position:fixed;z-index:1000;min-width:120px;background:var(--bg,#fff);border:1px solid var(--border,#ddd);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);padding:4px`;
+  menu.innerHTML = `
+    <button type="button" data-menu="reprocess" style="display:block;width:100%;text-align:left;padding:8px 12px;border:0;background:none;cursor:pointer;border-radius:6px">重跑</button>
+    <button type="button" data-menu="delete" style="display:block;width:100%;text-align:left;padding:8px 12px;border:0;background:none;cursor:pointer;border-radius:6px;color:#c0392b">删除</button>`;
+  document.body.appendChild(menu);
+  const x = Math.min(e.clientX, window.innerWidth - 140);
+  const y = Math.min(e.clientY, window.innerHeight - 90);
+  menu.style.left = x + "px";
+  menu.style.top = y + "px";
+  menu.querySelector('[data-menu="reprocess"]').onclick = () => {
+    closeArticleMenu();
+    void confirmAndReprocess([id]);
+  };
+  menu.querySelector('[data-menu="delete"]').onclick = () => {
+    closeArticleMenu();
+    void confirmDeleteArticle(id);
+  };
+});
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest?.("#article-menu")) closeArticleMenu();
+});
+window.addEventListener("blur", closeArticleMenu);
+
 async function saveSettings() {
   const apiKey = $("#s-key").value.trim();
   const baseUrl = $("#s-base").value.trim();
@@ -526,12 +590,6 @@ document.addEventListener("click", async (e) => {
   if (t.closest("#gallery-img")) {
     $("#lightbox-img").src = t.src;
     $("#lightbox").classList.remove("hidden");
-    return;
-  }
-  const repOne = t.closest("[data-rep]");
-  if (repOne) {
-    e.stopPropagation();
-    await confirmAndReprocess([repOne.dataset.rep]);
     return;
   }
   const ghead = t.closest("[data-gtoggle]");
