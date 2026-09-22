@@ -34,7 +34,9 @@ jobs:
         run: npm ci
 
       - name: Build Windows packages
-        run: npm run dist
+        run: |
+          npm run build:core
+          npx electron-builder --win --publish never
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
