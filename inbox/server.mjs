@@ -76,6 +76,17 @@ function findDuplicate(url) {
   return null;
 }
 
+/** 入队互斥：避免并发 POST 同一 URL 时 check-then-act 竞态 */
+let enqueueLock = Promise.resolve();
+function withEnqueueLock(fn) {
+  const run = enqueueLock.then(fn, fn);
+  enqueueLock = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://127.0.0.1:${PORT}`);
   const p = url.pathname;
@@ -87,19 +98,21 @@ const server = http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)) || "{}");
       const link = String(body.url || "").trim();
       if (!isWeChatUrl(link)) return json(res, 400, { error: "仅支持 mp.weixin.qq.com/s/ 文章链接" });
-      const dup = findDuplicate(link);
-      if (dup) return json(res, 200, { id: dup.id, status: "duplicate" });
-      const item = {
-        id: crypto.randomUUID(),
-        url: link,
-        note: typeof body.note === "string" ? body.note.slice(0, 500) : undefined,
-        status: "pending",
-        received_at: new Date().toISOString(),
-      };
-      rows.push(item);
-      persist();
-      console.log(`[collect] ${item.id} ${link}`);
-      return json(res, 201, { id: item.id, status: "queued" });
+      return withEnqueueLock(() => {
+        const dup = findDuplicate(link);
+        if (dup) return json(res, 200, { id: dup.id, status: "duplicate" });
+        const item = {
+          id: crypto.randomUUID(),
+          url: link,
+          note: typeof body.note === "string" ? body.note.slice(0, 500) : undefined,
+          status: "pending",
+          received_at: new Date().toISOString(),
+        };
+        rows.push(item);
+        persist();
+        console.log(`[collect] ${item.id} ${link}`);
+        return json(res, 201, { id: item.id, status: "queued" });
+      });
     }
 
     if (p === "/pull" && req.method === "GET") {
@@ -131,6 +144,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`inbox listening :${PORT} data=${DATA_DIR}`);
+const HOST = process.env.HOST || "127.0.0.1";
+server.listen(PORT, HOST, () => {
+  console.log(`inbox listening ${HOST}:${PORT} data=${DATA_DIR}`);
 });

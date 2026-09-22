@@ -216,15 +216,24 @@ function watchClipboard() {
 }
 
 /** 手机收件箱：拉取并自动入库，完成后系统通知。 */
+let inboxTimer = null;
 function watchInbox() {
-  setInterval(async () => {
+  const arm = (ms) => {
+    if (inboxTimer) clearInterval(inboxTimer);
+    inboxTimer = setInterval(tickInbox, ms);
+  };
+  const tickInbox = async () => {
     if (ingesting) return;
+    let intervalSec = 30;
     try {
       const cfg = (await (await fetch(`${BASE}/api/config`)).json()) || {};
       if (!cfg.inboxEnabled) return;
+      intervalSec = cfg.inboxIntervalSec || 30;
     } catch {
       return;
     }
+    const wantMs = Math.min(120000, Math.max(10000, intervalSec * 1000));
+    if (inboxTimer && inboxTimer._ms !== wantMs) arm(wantMs);
     try {
       const r = await fetch(`${BASE}/api/inbox/drain`, { method: "POST" });
       const data = await r.json();
@@ -232,14 +241,17 @@ function watchInbox() {
         const titles = (data.titles || []).slice(0, 2).join("、");
         new Notification({
           title: data.fail ? "手机收集部分失败" : "✔ 手机收集完成",
-          body: `成功 ${data.ok || 0}${data.fail ? `，失败 ${data.fail}` : ""}${titles ? `：${titles}` : ""}`,
+          body: `成功 ${data.ok || 0}${data.cards ? ` · ${data.cards} 卡` : ""}${data.fail ? `，失败 ${data.fail}` : ""}${titles ? `：${titles}` : ""}`,
           icon,
         }).show();
       }
     } catch {
       /* 网络或服务未就绪时静默，下轮再试 */
     }
-  }, 30_000);
+  };
+  arm(30_000);
+  inboxTimer._ms = 30000;
+  void tickInbox();
 }
 
 async function ingest(url) {

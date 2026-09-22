@@ -72,7 +72,11 @@ async function main() {
         console.log("已保存:", { ...c, apiKey: c.apiKey ? c.apiKey.slice(0, 6) + "…" : "" });
       } else {
         const c = loadConfig();
-        console.log({ ...c, apiKey: c.apiKey ? c.apiKey.slice(0, 6) + "…" : "(未设置)" });
+        console.log({
+          ...c,
+          apiKey: c.apiKey ? c.apiKey.slice(0, 6) + "…" : "(未设置)",
+          inboxToken: c.inboxToken ? c.inboxToken.slice(0, 4) + "…" : "(未设置)",
+        });
       }
       break;
     }

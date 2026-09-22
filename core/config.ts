@@ -23,6 +23,8 @@ export interface Config {
   inboxUrl: string;
   inboxToken: string;
   inboxEnabled: boolean;
+  /** 收件箱轮询间隔秒，10–120 */
+  inboxIntervalSec: number;
 }
 
 const DEFAULTS: Config = {
@@ -35,6 +37,7 @@ const DEFAULTS: Config = {
   inboxUrl: "",
   inboxToken: "",
   inboxEnabled: false,
+  inboxIntervalSec: 30,
 };
 
 /** 读取 .env（KEY=VALUE 简单格式，支持 # 注释）；依次查项目根与数据目录（打包态 userData 优先） */
@@ -74,6 +77,7 @@ export function loadConfig(): Config {
     inboxUrl: file.inboxUrl || env.INBOX_URL || process.env.INBOX_URL || DEFAULTS.inboxUrl,
     inboxToken: file.inboxToken || env.INBOX_TOKEN || process.env.INBOX_TOKEN || DEFAULTS.inboxToken,
     inboxEnabled: file.inboxEnabled ?? DEFAULTS.inboxEnabled,
+    inboxIntervalSec: Math.min(120, Math.max(10, file.inboxIntervalSec ?? DEFAULTS.inboxIntervalSec)),
   };
 }
 

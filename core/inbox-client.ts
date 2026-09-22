@@ -1,4 +1,3 @@
-import { reprocess } from "./ingest.js";
 import { loadConfig } from "./config.js";
 
 export interface InboxItem {
@@ -22,11 +21,6 @@ async function inboxFetch(path: string, init: RequestInit = {}): Promise<Respons
   });
 }
 
-export async function inboxPull(limit = 5): Promise<InboxItem[]> {
-  const r = await inboxPullRaw(limit);
-  return r;
-}
-
 async function inboxPullRaw(limit: number): Promise<InboxItem[]> {
   const res = await inboxFetch(`/pull?limit=${limit}`);
   const data = (await res.json()) as { items?: InboxItem[]; error?: string };
@@ -47,17 +41,23 @@ export async function inboxAck(id: string, ok: boolean, error?: string): Promise
 
 /** 拉取一批并逐条走 ingest（refresh），无论成败都 ack。返回汇总。进程内互斥。 */
 let drainLock = false;
-export async function drainInboxOnce(): Promise<{ ok: number; fail: number; titles: string[] }> {
+export async function drainInboxOnce(): Promise<{
+  ok: number;
+  fail: number;
+  titles: string[];
+  cards: number;
+}> {
   const cfg = loadConfig();
   if (!cfg.inboxEnabled || !cfg.inboxUrl || !cfg.inboxToken) {
-    return { ok: 0, fail: 0, titles: [] };
+    return { ok: 0, fail: 0, titles: [], cards: 0 };
   }
-  if (drainLock) return { ok: 0, fail: 0, titles: [] };
+  if (drainLock) return { ok: 0, fail: 0, titles: [], cards: 0 };
   drainLock = true;
   try {
     const items = await inboxPullRaw(5);
     let ok = 0,
-      fail = 0;
+      fail = 0,
+      cards = 0;
     const titles: string[] = [];
     for (const it of items) {
       try {
@@ -65,6 +65,7 @@ export async function drainInboxOnce(): Promise<{ ok: number; fail: number; titl
         await inboxAck(it.id, true);
         ok++;
         titles.push(r.title);
+        cards += Object.values(r.counts || {}).reduce((s, n) => s + n, 0);
       } catch (e) {
         const msg = (e as Error).message || "error";
         try {
@@ -75,7 +76,7 @@ export async function drainInboxOnce(): Promise<{ ok: number; fail: number; titl
         fail++;
       }
     }
-    return { ok, fail, titles };
+    return { ok, fail, titles, cards };
   } finally {
     drainLock = false;
   }
@@ -107,7 +108,8 @@ export function startInboxPoller(): void {
       running = false;
     }
   };
-  timer = setInterval(() => void tick(), 30_000);
+  const sec = Math.min(120, Math.max(10, loadConfig().inboxIntervalSec || 30));
+  timer = setInterval(() => void tick(), sec * 1000);
   void tick();
 }
 
