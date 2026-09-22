@@ -367,6 +367,16 @@ function openSettings() {
       <label>模型</label>
       <input type="text" id="s-model" value="${esc(c.model ?? "")}">
       <div class="modal-hint">保存在本机配置文件中，不会上传。任何 OpenAI 兼容的多模态模型服务均可。</div>
+      <h3 style="margin-top:18px">手机收集（收件箱）</h3>
+      <div class="modal-hint">iPhone 快捷指令 POST 到 VPS，本机自动拉取拆卡。部署见 <code>inbox/README.md</code>。</div>
+      <label>收件箱 URL</label>
+      <input type="text" id="s-inbox-url" placeholder="https://collect.example.com" value="${esc(c.inboxUrl ?? "")}">
+      <label>Inbox Token ${c.inboxTokenSet ? "（已设置，留空则不改）" : "（必填）"}</label>
+      <input type="password" id="s-inbox-token" placeholder="与 VPS 的 INBOX_TOKEN 相同" value="">
+      <label style="display:flex;gap:8px;align-items:center;font-weight:400;margin-top:8px">
+        <input type="checkbox" id="s-inbox-enabled" ${c.inboxEnabled ? "checked" : ""}> 启用手机收集（每 30 秒拉取）
+      </label>
+      <div class="modal-hint" style="margin-top:12px">iPhone 快捷指令：「获取 URL」→「获取 URL 内容」POST <b>$(inboxUrl)/collect</b>，Header <code>Authorization: Bearer 你的token</code>，JSON body <code>{"url":"…"}</code>。分享菜单运行即可。</div>
       <h3 style="margin-top:18px">重跑提取</h3>
       <div class="modal-hint">换模型后可对旧文章重新拆卡。将<strong>整篇替换</strong>该文全部卡片（含手改），需在线重抓原文。</div>
       <div style="max-height:180px;overflow:auto;border:1px solid var(--border,#ddd);border-radius:8px;padding:8px;margin-top:8px">
@@ -514,8 +524,17 @@ async function saveSettings() {
   const apiKey = $("#s-key").value.trim();
   const baseUrl = $("#s-base").value.trim();
   const model = $("#s-model").value.trim();
-  const patch = { baseUrl, model };
+  const inboxUrl = $("#s-inbox-url").value.trim();
+  const inboxToken = $("#s-inbox-token").value.trim();
+  const inboxEnabled = $("#s-inbox-enabled").checked;
+  const patch = {
+    baseUrl,
+    model,
+    inboxUrl,
+    inboxEnabled,
+  };
   if (apiKey) patch.apiKey = apiKey;
+  if (inboxToken) patch.inboxToken = inboxToken;
   const r = await fetch("/api/config", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

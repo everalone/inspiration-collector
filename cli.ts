@@ -76,6 +76,13 @@ async function main() {
       }
       break;
     }
+    case "inbox-pull": {
+      const { drainInboxOnce } = await import("./core/inbox-client.js");
+      const r = await drainInboxOnce();
+      console.log(`inbox: ok=${r.ok} fail=${r.fail}${r.titles.length ? " " + r.titles.join(" | ") : ""}`);
+      if (r.fail) process.exitCode = 1;
+      break;
+    }
     case "serve": {
       const port = Number(rest.find((a) => a.startsWith("--port="))?.split("=")[1]) || loadConfig().serverPort;
       await startServer(port);
@@ -85,6 +92,7 @@ async function main() {
       console.log(`用法:
   npm run ingest -- <url>... [--offline <本地html路径>]   收集文章（--offline 后跟本地保存的 html）
   node cli.ts reprocess <articleId>                       重跑提取
+  node cli.ts inbox-pull                                  拉取手机收件箱并自动入库
   node cli.ts list                                        列出已入库文章
   node cli.ts config [set k=v ...]                        查看/修改配置
   node cli.ts serve [--port=5178]                         启动卡片墙`);

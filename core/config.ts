@@ -19,6 +19,10 @@ export interface Config {
   maxTokens: number;
   serverPort: number;
   seedTags: string[];
+  /** 手机收件箱：公网 HTTPS 地址，如 https://collect.example.com */
+  inboxUrl: string;
+  inboxToken: string;
+  inboxEnabled: boolean;
 }
 
 const DEFAULTS: Config = {
@@ -28,6 +32,9 @@ const DEFAULTS: Config = {
   maxTokens: 12000,
   serverPort: 5178,
   seedTags: ["UI设计", "前端", "AI工具", "提示词工程", "设计理论", "配色", "效率工具", "写作", "方法论"],
+  inboxUrl: "",
+  inboxToken: "",
+  inboxEnabled: false,
 };
 
 /** 读取 .env（KEY=VALUE 简单格式，支持 # 注释）；依次查项目根与数据目录（打包态 userData 优先） */
@@ -64,6 +71,9 @@ export function loadConfig(): Config {
     maxTokens: file.maxTokens ?? DEFAULTS.maxTokens,
     serverPort: file.serverPort ?? DEFAULTS.serverPort,
     seedTags: file.seedTags ?? DEFAULTS.seedTags,
+    inboxUrl: file.inboxUrl || env.INBOX_URL || process.env.INBOX_URL || DEFAULTS.inboxUrl,
+    inboxToken: file.inboxToken || env.INBOX_TOKEN || process.env.INBOX_TOKEN || DEFAULTS.inboxToken,
+    inboxEnabled: file.inboxEnabled ?? DEFAULTS.inboxEnabled,
   };
 }
 

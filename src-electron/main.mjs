@@ -67,6 +67,7 @@ async function boot() {
     createWindow();
     createTray();
     watchClipboard();
+    watchInbox();
     new Notification({ title: "灵感收集已启动", body: "复制微信文章链接即可自动收集", icon }).show();
   } catch (e) {
     dialogError(`启动异常: ${String(e).slice(0, 100)}`);
@@ -212,6 +213,33 @@ function watchClipboard() {
     }
     await ingest(url);
   }, 1500);
+}
+
+/** 手机收件箱：拉取并自动入库，完成后系统通知。 */
+function watchInbox() {
+  setInterval(async () => {
+    if (ingesting) return;
+    try {
+      const cfg = (await (await fetch(`${BASE}/api/config`)).json()) || {};
+      if (!cfg.inboxEnabled) return;
+    } catch {
+      return;
+    }
+    try {
+      const r = await fetch(`${BASE}/api/inbox/drain`, { method: "POST" });
+      const data = await r.json();
+      if (data && (data.ok || data.fail)) {
+        const titles = (data.titles || []).slice(0, 2).join("、");
+        new Notification({
+          title: data.fail ? "手机收集部分失败" : "✔ 手机收集完成",
+          body: `成功 ${data.ok || 0}${data.fail ? `，失败 ${data.fail}` : ""}${titles ? `：${titles}` : ""}`,
+          icon,
+        }).show();
+      }
+    } catch {
+      /* 网络或服务未就绪时静默，下轮再试 */
+    }
+  }, 30_000);
 }
 
 async function ingest(url) {

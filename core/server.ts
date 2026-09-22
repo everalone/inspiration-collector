@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { ROOT_DIR, ASSETS_DIR, loadConfig, saveConfig } from "./config.js";
 import { listItems, countItems, getItem, updateItem, deleteItem, deleteArticle, listArticles, typeCounts, getArticle, type ItemRow } from "./store.js";
 import { ingest, reprocess } from "./ingest.js";
+import { startInboxPoller } from "./inbox-client.js";
 
 // viewer 静态目录：开发态在项目根；打包态在应用根（asar），由主进程通过环境变量注入
 const VIEWER_DIR = process.env.INSPIRATION_APP_ROOT
@@ -60,6 +61,9 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
         keyMasked: c.apiKey ? c.apiKey.slice(0, 6) + "…" + c.apiKey.slice(-4) : "",
         baseUrl: c.baseUrl,
         model: c.model,
+        inboxUrl: c.inboxUrl,
+        inboxTokenSet: !!c.inboxToken,
+        inboxEnabled: c.inboxEnabled,
       });
     }
     if (p === "/api/crop") {
@@ -118,17 +122,26 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
   }
 
   if (req.method === "POST" && p === "/api/config") {
-    const body = JSON.parse(await readBody(req)) as { apiKey?: string; baseUrl?: string; model?: string };
-    const patch: Record<string, string> = {};
+    const body = JSON.parse(await readBody(req)) as {
+      apiKey?: string; baseUrl?: string; model?: string;
+      inboxUrl?: string; inboxToken?: string; inboxEnabled?: boolean;
+    };
+    const patch: Record<string, unknown> = {};
     if (typeof body.apiKey === "string") patch.apiKey = body.apiKey.trim();
     if (typeof body.baseUrl === "string" && body.baseUrl.trim()) patch.baseUrl = body.baseUrl.trim().replace(/\/$/, "");
     if (typeof body.model === "string" && body.model.trim()) patch.model = body.model.trim();
-    const saved = saveConfig(patch);
+    if (typeof body.inboxUrl === "string") patch.inboxUrl = body.inboxUrl.trim().replace(/\/$/, "");
+    if (typeof body.inboxToken === "string" && body.inboxToken.trim()) patch.inboxToken = body.inboxToken.trim();
+    if (typeof body.inboxEnabled === "boolean") patch.inboxEnabled = body.inboxEnabled;
+    const saved = saveConfig(patch as Parameters<typeof saveConfig>[0]);
     return sendJson(res, 200, {
       hasKey: !!saved.apiKey,
       keyMasked: saved.apiKey ? saved.apiKey.slice(0, 6) + "…" + saved.apiKey.slice(-4) : "",
       baseUrl: saved.baseUrl,
       model: saved.model,
+      inboxUrl: saved.inboxUrl,
+      inboxTokenSet: !!saved.inboxToken,
+      inboxEnabled: saved.inboxEnabled,
     });
   }
 
@@ -160,6 +173,12 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       }
     }
     return sendJson(res, 200, { results });
+  }
+
+  if (req.method === "POST" && p === "/api/inbox/drain") {
+    const { drainInboxOnce } = await import("./inbox-client.js");
+    const r = await drainInboxOnce();
+    return sendJson(res, 200, r);
   }
 
   const m = p.match(/^\/api\/items\/([\w-]+)$/);
@@ -208,6 +227,7 @@ export function startServer(port: number): Promise<void> {
     server.on("error", reject);
     server.listen(port, "127.0.0.1", () => {
       console.log(`卡片墙已启动: http://127.0.0.1:${port}`);
+      startInboxPoller();
       resolve();
     });
   });
