@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const MODULE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = path.basename(MODULE_ROOT) === "dist" ? path.dirname(MODULE_ROOT) : MODULE_ROOT;
 export const ROOT_DIR = ROOT;
 // 打包运行时由 Electron 设置 INSPIRATION_DATA_DIR 指向用户数据目录；开发态用项目根
 const BASE_DIR = process.env.INSPIRATION_DATA_DIR ?? ROOT;
@@ -40,10 +41,10 @@ const DEFAULTS: Config = {
   inboxIntervalSec: 30,
 };
 
-/** 读取 .env（KEY=VALUE 简单格式，支持 # 注释）；依次查项目根与数据目录（打包态 userData 优先） */
+/** 显式指定数据目录时仅使用该目录的 .env，避免开发/测试/正式库串用配置。 */
 function loadDotEnv(): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const dir of [ROOT, BASE_DIR]) {
+  for (const dir of [BASE_DIR]) {
     const p = path.join(dir, ".env");
     if (!fs.existsSync(p)) continue;
     for (const line of fs.readFileSync(p, "utf8").split(/\r?\n/)) {
@@ -68,22 +69,24 @@ export function loadConfig(): Config {
   const env = loadDotEnv();
   return {
     ...DEFAULTS,
-    apiKey: file.apiKey || env.API_KEY || process.env.API_KEY || DEFAULTS.apiKey,
+    apiKey: file.apiKey ?? env.API_KEY ?? process.env.API_KEY ?? DEFAULTS.apiKey,
     baseUrl: file.baseUrl || env.BASE_URL || process.env.BASE_URL || DEFAULTS.baseUrl,
     model: file.model || env.MODEL || process.env.MODEL || DEFAULTS.model,
     maxTokens: file.maxTokens ?? DEFAULTS.maxTokens,
     serverPort: file.serverPort ?? DEFAULTS.serverPort,
     seedTags: file.seedTags ?? DEFAULTS.seedTags,
-    inboxUrl: file.inboxUrl || env.INBOX_URL || process.env.INBOX_URL || DEFAULTS.inboxUrl,
-    inboxToken: file.inboxToken || env.INBOX_TOKEN || process.env.INBOX_TOKEN || DEFAULTS.inboxToken,
+    inboxUrl: file.inboxUrl ?? env.INBOX_URL ?? process.env.INBOX_URL ?? DEFAULTS.inboxUrl,
+    inboxToken: file.inboxToken ?? env.INBOX_TOKEN ?? process.env.INBOX_TOKEN ?? DEFAULTS.inboxToken,
     inboxEnabled: file.inboxEnabled ?? DEFAULTS.inboxEnabled,
-    inboxIntervalSec: Math.min(120, Math.max(10, file.inboxIntervalSec ?? DEFAULTS.inboxIntervalSec)),
+    inboxIntervalSec: Number.isFinite(file.inboxIntervalSec)
+      ? Math.min(120, Math.max(10, Number(file.inboxIntervalSec))) : DEFAULTS.inboxIntervalSec,
   };
 }
 
 export function saveConfig(patch: Partial<Config>): Config {
   const merged = { ...loadConfig(), ...patch };
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2), "utf8");
+  fs.writeFileSync(`${CONFIG_PATH}.tmp`, JSON.stringify(merged, null, 2), { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(`${CONFIG_PATH}.tmp`, CONFIG_PATH);
   return merged;
 }

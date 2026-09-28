@@ -1,13 +1,12 @@
 import { app, BrowserWindow, Tray, Menu, clipboard, Notification, nativeImage } from "electron";
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createClipboardCollector } from "./collection-controller.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PORT = 5178;
+const PORT = Number(process.env.INSPIRATION_PORT) || 5178;
 const BASE = `http://127.0.0.1:${PORT}`;
-const WX_URL_RE = /https?:\/\/mp\.weixin\.qq\.com\/s\/[A-Za-z0-9_-]+/;
 
 app.setAppUserModelId("com.p016.inspiration-collector");
 
@@ -16,14 +15,18 @@ const startHidden = process.argv.includes("--hidden");
 
 let tray = null;
 let win = null;
-let serverProc = null;
-let serverMode = "none"; // in-process | child-process | external | none
 let lastCoreError = null;
-let lastClipboard = "";
 let autoCollect = true;
-let ingesting = false;
+let clipboardTimer = null;
+let notificationTimer = null;
+const launchedAt = Date.now();
 
 app.isQuiting = false;
+
+// Select the data directory before locking, keeping development and packaged instances separate.
+const userDataDir = path.resolve(process.env.INSPIRATION_DATA_DIR || (app.isPackaged
+  ? path.join(app.getPath("appData"), "灵感收集") : ROOT));
+app.setPath("userData", userDataDir);
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -41,9 +44,7 @@ function showWindow() {
 async function boot() {
   try {
     // 数据目录固定为 %AppData%/灵感收集（Electron 默认用 package.json 的 name，重装/改名也不变）
-    const userDataDir = path.join(app.getPath("appData"), "灵感收集");
     fs.mkdirSync(userDataDir, { recursive: true });
-    app.setPath("userData", userDataDir);
     // 数据写入用户目录（安装目录只读）
     process.env.INSPIRATION_DATA_DIR = userDataDir;
     // 应用根目录（asar 内），供核心服务定位 viewer 静态文件
@@ -67,7 +68,7 @@ async function boot() {
     createWindow();
     createTray();
     watchClipboard();
-    watchInbox();
+    watchTaskNotifications();
     new Notification({ title: "灵感收集已启动", body: "复制微信文章链接即可自动收集", icon }).show();
   } catch (e) {
     dialogError(`启动异常: ${String(e).slice(0, 100)}`);
@@ -76,42 +77,18 @@ async function boot() {
 }
 
 async function startCore() {
-  // 打包态：dist 已随包发布，直接用 Electron 内置 Node 跑核心服务
+  // Both development and packaged launches use the freshly built core.
   try {
     const { startServer } = await import("../dist/core/server.js");
     await startServer(PORT);
-    serverMode = "in-process";
     return;
   } catch (e) {
     if (String(e).includes("EADDRINUSE")) {
-      // 端口已被占（多为已有实例在跑），直接复用
-      serverMode = "external";
-      return;
+      throw new Error(`本机端口 ${PORT} 已被占用，请退出旧版灵感收集或开发服务后重试。`);
     }
-    // dist 缺失或损坏 → 开发态回退到 tsx 子进程
     lastCoreError = e;
+    throw e;
   }
-  serverProc = spawn("npx", ["tsx", "cli.ts", "serve"], {
-    cwd: ROOT,
-    stdio: "ignore",
-    windowsHide: true,
-    shell: process.platform === "win32", // Windows 上 npx 是 .cmd，必须走 shell
-  });
-  serverMode = "child-process";
-  serverProc.on("exit", () => {
-    serverProc = null;
-  });
-}
-
-function stopServer() {
-  if (serverMode !== "child-process") return; // 进程内服务随应用退出，无需处理
-  if (!serverProc) return;
-  if (process.platform === "win32" && serverProc.pid) {
-    spawn("taskkill", ["/T", "/F", "/PID", String(serverProc.pid)], { windowsHide: true });
-  } else {
-    serverProc.kill();
-  }
-  serverProc = null;
 }
 
 async function waitForServer(retries = 40) {
@@ -190,103 +167,59 @@ function createTray() {
 }
 
 function watchClipboard() {
-  setInterval(async () => {
-    let text = "";
-    try {
-      text = String(clipboard.readText() ?? "").trim();
-    } catch {
-      return;
-    }
-    if (!text || text === lastClipboard) return;
-    lastClipboard = text;
-    if (!autoCollect || ingesting) return;
-    const url = text.match(WX_URL_RE)?.[0];
-    if (!url) return;
-    try {
-      const articles = await (await fetch(`${BASE}/api/articles`)).json();
-      if (articles.some((a) => a.id === url.split("/s/")[1] || a.url === url)) {
-        new Notification({ title: "灵感收集", body: "这篇文章已在库里了", icon }).show();
-        return;
-      }
-    } catch {
-      return;
-    }
-    await ingest(url);
+  const collector = createClipboardCollector({
+    submit: async (url) => {
+      const response = await fetch(`${BASE}/api/tasks`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, source: "clipboard" }), signal: AbortSignal.timeout(10000),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "未能加入任务队列");
+    },
+    onQueued: () => new Notification({ title: "已加入收集队列", body: "可以继续复制下一篇，完成后会通知你。", icon }).show(),
+    onError: () => new Notification({ title: "暂时无法提交收集", body: "链接已暂存，连接恢复后自动重试。", icon }).show(),
+  });
+  clipboardTimer = setInterval(() => {
+    try { void collector.accept(clipboard.readText(), autoCollect); } catch { /* clipboard temporarily unavailable */ }
   }, 1500);
 }
 
-/** 手机收件箱：拉取并自动入库，完成后系统通知。 */
-let inboxTimer = null;
-function watchInbox() {
-  const arm = (ms) => {
-    if (inboxTimer) clearInterval(inboxTimer);
-    inboxTimer = setInterval(tickInbox, ms);
-  };
-  const tickInbox = async () => {
-    if (ingesting) return;
-    let intervalSec = 30;
+/** Core owns collection and inbox polling; Electron only observes results. */
+function watchTaskNotifications() {
+  const seen = new Set();
+  let polling = false;
+  const tick = async () => {
+    if (polling) return;
+    polling = true;
     try {
-      const cfg = (await (await fetch(`${BASE}/api/config`)).json()) || {};
-      if (!cfg.inboxEnabled) return;
-      intervalSec = cfg.inboxIntervalSec || 30;
-    } catch {
-      return;
-    }
-    const wantMs = Math.min(120000, Math.max(10000, intervalSec * 1000));
-    if (inboxTimer && inboxTimer._ms !== wantMs) arm(wantMs);
-    try {
-      const r = await fetch(`${BASE}/api/inbox/drain`, { method: "POST" });
-      const data = await r.json();
-      if (data && (data.ok || data.fail)) {
-        const titles = (data.titles || []).slice(0, 2).join("、");
-        new Notification({
-          title: data.fail ? "手机收集部分失败" : "✔ 手机收集完成",
-          body: `成功 ${data.ok || 0}${data.cards ? ` · ${data.cards} 卡` : ""}${data.fail ? `，失败 ${data.fail}` : ""}${titles ? `：${titles}` : ""}`,
+      const response = await fetch(`${BASE}/api/tasks`, { signal: AbortSignal.timeout(10000) });
+      if (!response.ok) return;
+      const { tasks = [] } = await response.json();
+      for (const task of tasks) {
+        if (!["done", "failed"].includes(task.status) || Date.parse(task.updatedAt) < launchedAt) continue;
+        const key = `${task.id}:${task.attempts}:${task.status}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const skipped = task.result?.skipped;
+        const cards = Object.values(task.result?.counts || {}).reduce((sum, value) => sum + Number(value), 0);
+        const notification = new Notification({
+          title: task.status === "failed" ? "收集失败" : skipped ? "这篇文章已在库中" : "✔ 收集完成",
+          body: task.status === "failed" ? "可在任务列表查看原因并重试。" : `${task.title || "文章"}${skipped ? " · 已保留现有卡片" : ` · ${cards} 张卡片`}`,
           icon,
-        }).show();
+        });
+        notification.on("click", showWindow);
+        notification.show();
       }
-    } catch {
-      /* 网络或服务未就绪时静默，下轮再试 */
-    }
+    } catch { /* The core may be restarting; the next snapshot catches up. */ }
+    finally { polling = false; }
   };
-  arm(30_000);
-  inboxTimer._ms = 30000;
-  void tickInbox();
-}
-
-async function ingest(url) {
-  ingesting = true;
-  new Notification({ title: "开始收集", body: "正在抓取并提取卡片，约 1~2 分钟…", icon }).show();
-  try {
-    const r = await fetch(`${BASE}/api/ingest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
-    const data = await r.json();
-    if (data.error) {
-      new Notification({ title: "收集失败", body: String(data.error).slice(0, 120), icon }).show();
-    } else {
-      const counts = Object.entries(data.counts)
-        .map(([k, v]) => ({ palette: "配色", website: "网址", repo: "项目", prompt: "提示词", note: "笔记" }[k] + `×${v}`))
-        .join("，");
-      const n = new Notification({
-        title: "✔ 收集完成",
-        body: `${counts || "未提取到卡片"}${data.unsureCount ? `（${data.unsureCount} 待核对）` : ""}`,
-        icon,
-      });
-      n.on("click", () => showWindow());
-      n.show();
-    }
-  } catch (e) {
-    new Notification({ title: "收集失败", body: String(e).slice(0, 120), icon }).show();
-  } finally {
-    ingesting = false;
-  }
+  notificationTimer = setInterval(tick, 3000);
+  void tick();
 }
 
 app.on("before-quit", () => {
-  stopServer();
+  clearInterval(clipboardTimer);
+  clearInterval(notificationTimer);
 });
 app.on("window-all-closed", () => {
   // 托盘常驻，不随窗口关闭退出

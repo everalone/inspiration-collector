@@ -8,11 +8,12 @@ export class CaptchaError extends Error {
   }
 }
 
-async function once(url: string, extraHeaders: Record<string, string> = {}): Promise<Response> {
+/** Keep the deadline active until the consumer finishes reading the response body. */
+async function once<T>(url: string, read: (response: Response) => Promise<T>, extraHeaders: Record<string, string> = {}): Promise<T> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 20_000);
   try {
-    return await fetch(url, {
+    const response = await fetch(url, {
       redirect: "follow",
       signal: ctrl.signal,
       headers: {
@@ -21,6 +22,7 @@ async function once(url: string, extraHeaders: Record<string, string> = {}): Pro
         ...extraHeaders,
       },
     });
+    return await read(response);
   } finally {
     clearTimeout(timer);
   }
@@ -31,17 +33,18 @@ export async function fetchHtml(url: string): Promise<string> {
   let lastErr: unknown;
   for (let i = 0; i < 3; i++) {
     try {
-      const res = await once(url);
-      const text = await res.text();
-      if (text.includes("环境异常") || text.includes("完成验证后即可继续访问")) {
-        throw new CaptchaError("触发微信风控验证页。兜底：在浏览器打开文章 → 右键另存为 HTML → 用 `ingest --offline <保存的html路径>` 解析。");
-      }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return text;
+      return await once(url, async (res) => {
+        const text = await res.text();
+        if (text.includes("环境异常") || text.includes("完成验证后即可继续访问")) {
+          throw new CaptchaError("触发微信风控验证页。兜底：在浏览器打开文章 → 右键另存为 HTML → 用 `ingest --offline <保存的html路径>` 解析。");
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return text;
+      });
     } catch (e) {
       if (e instanceof CaptchaError) throw e;
       lastErr = e;
-      await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+      if (i < 2) await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
     }
   }
   throw new Error(`抓取失败（重试3次）: ${lastErr}`);
@@ -62,10 +65,12 @@ export function extFromWxFmt(url: string): string {
 
 /** 下载正文图片（mmbiz CDN 匿名可访问） */
 export async function downloadImage(url: string, dest: string): Promise<void> {
-  const res = await once(url, { Referer: "https://mp.weixin.qq.com/" });
-  if (!res.ok) throw new Error(`图片下载 HTTP ${res.status}: ${url}`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.length < 100) throw new Error(`图片过小(${buf.length}B)，疑似失败: ${url}`);
+  const buf = await once(url, async (res) => {
+    if (!res.ok) throw new Error(`图片下载 HTTP ${res.status}: ${url}`);
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.length < 100) throw new Error(`图片过小(${bytes.length}B)，疑似失败: ${url}`);
+    return bytes;
+  }, { Referer: "https://mp.weixin.qq.com/" });
   const { writeFile } = await import("node:fs/promises");
   await writeFile(dest, buf);
 }

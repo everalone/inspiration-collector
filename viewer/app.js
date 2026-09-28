@@ -2,7 +2,8 @@
 "use strict";
 
 const TYPE_LABEL = { palette: "配色", website: "网址", repo: "github", prompt: "提示词", note: "笔记" };
-const state = { type: "all", q: "", verify: null, items: [], selectedId: null, bootstrap: null };
+const state = { type: "all", q: "", verify: null, items: [], selectedId: null, bootstrap: null,
+  loadingItems: false, itemTotal: 0, itemError: "", tasks: [], inbox: null, taskError: "" };
 const imgCache = new Map(); // articleId -> Promise<string[]>
 const collapsedGroups = new Set(); // 折叠的文章分组
 let gallery = { files: [], idx: 0 };
@@ -10,6 +11,12 @@ let gallery = { files: [], idx: 0 };
 const $ = (sel) => document.querySelector(sel);
 const toastEl = $("#toast");
 let toastTimer = null;
+let itemRequest = 0;
+let taskPolling = false;
+let taskSnapshot = null;
+let remoteFailures = [];
+let remoteFailureMessage = "";
+let settingsRequest = 0;
 
 function toast(msg) {
   toastEl.textContent = msg;
@@ -37,10 +44,29 @@ function esc(s) {
 }
 function safeParse(s, fallback = {}) { try { return JSON.parse(s); } catch { return fallback; } }
 
+function errorText(error) {
+  return String(error?.message ?? error ?? "请求失败")
+    .replace(/Bearer\s+\S+/gi, "Bearer [已隐藏]")
+    .replace(/\bsk-[a-zA-Z0-9_-]+/g, "[已隐藏]")
+    .replace(/((?:api[_-]?key|token|authorization)\s*[=:]\s*)[^\s,;]+/gi, "$1[已隐藏]");
+}
+
+async function requestJSON(url, options) {
+  const r = await fetch(url, options);
+  let data;
+  try { data = await r.json(); }
+  catch { throw new Error(r.ok ? "服务返回了无法读取的数据" : `请求失败（${r.status}）`); }
+  if (!r.ok || data?.error) throw new Error(errorText(data?.error || `请求失败（${r.status}）`));
+  return data;
+}
+
+function jsonPost(body) {
+  return { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+}
+
 /* ---------- 数据 ---------- */
 async function loadBootstrap() {
-  const r = await fetch("/api/bootstrap");
-  state.bootstrap = await r.json();
+  state.bootstrap = await requestJSON("/api/bootstrap");
   renderTabs();
   const b = state.bootstrap;
   const total = Object.values(b.typeCounts).reduce((a, c) => a + c, 0);
@@ -52,18 +78,49 @@ async function loadBootstrap() {
 }
 
 async function loadItems() {
+  const request = ++itemRequest;
   const p = new URLSearchParams();
   if (state.type !== "all") p.set("type", state.type);
   if (state.q) p.set("q", state.q);
   if (state.verify) p.set("verify", state.verify);
-  const r = await fetch("/api/items?" + p.toString());
-  const data = await r.json();
-  state.items = data.items;
-  if (!state.items.some((it) => it.id === state.selectedId)) {
-    state.selectedId = state.items[0]?.id ?? null;
-  }
+  p.set("limit", "200");
+  state.loadingItems = true;
+  state.itemError = "";
   renderList();
-  renderDetail();
+  const items = [];
+  const ids = new Set();
+  let offset = 0;
+  try {
+    do {
+      p.set("offset", String(offset));
+      const data = await requestJSON("/api/items?" + p.toString());
+      if (request !== itemRequest) return;
+      if (!Array.isArray(data.items) || !Number.isFinite(data.total)) throw new Error("卡片列表返回格式不正确");
+      let added = 0;
+      for (const item of data.items) {
+        if (!ids.has(item.id)) { ids.add(item.id); items.push(item); added++; }
+      }
+      if (!added && offset < data.total) throw new Error("卡片列表未加载完整，请重新加载");
+      offset += data.items.length;
+      state.items = [...items];
+      state.itemTotal = data.total;
+      renderList();
+      if (offset >= data.total) break;
+    } while (true);
+    if (!state.items.some((it) => it.id === state.selectedId)) {
+      state.selectedId = state.items[0]?.id ?? null;
+    }
+    renderDetail();
+  } catch (error) {
+    if (request !== itemRequest) return;
+    state.itemError = errorText(error);
+    toast("卡片加载失败：" + state.itemError);
+  } finally {
+    if (request === itemRequest) {
+      state.loadingItems = false;
+      renderList();
+    }
+  }
 }
 
 function selectedItem() {
@@ -135,7 +192,10 @@ function renderList() {
     }
     map.get(it.article_id).items.push(it);
   }
-  $("#list").innerHTML =
+  const notice = state.loadingItems
+    ? `<div class="list-status" role="status">正在加载卡片…</div>`
+    : state.itemError ? `<div class="list-status load-error" role="status">${esc(state.itemError)} <button class="mini-btn" data-reload-items>重新加载</button></div>` : "";
+  $("#list").innerHTML = notice + (
     groups
       .map((g) => {
         const isCollapsed = collapsedGroups.has(g.id);
@@ -152,7 +212,7 @@ function renderList() {
           ${isCollapsed ? "" : `<div class="group-items">${g.items.map(itemHtml).join("")}</div>`}
         </div>`;
       })
-      .join("") || `<div class="empty">没有匹配的卡片</div>`;
+      .join("") || (state.loadingItems ? "" : `<div class="empty">没有匹配的卡片</div>`));
 }
 
 /* ---------- 右侧详情 ---------- */
@@ -239,6 +299,7 @@ function renderDetail() {
 
   // 异步取来源原图；有 bbox 时按区域裁剪，点开放大看完整图
   articleImages(item.article_id).then((files) => {
+    if (state.selectedId !== item.id) return;
     const img = document.getElementById("detail-img");
     const gal = document.getElementById("gallery");
     if (!gal) return;
@@ -321,6 +382,7 @@ function modalHtml(item) {
 function openEditModal(id) {
   const item = state.items.find((it) => it.id === id);
   if (!item) return;
+  settingsRequest++;
   const modal = $("#modal");
   modal.innerHTML = modalHtml(item);
   modal.classList.remove("hidden");
@@ -330,25 +392,22 @@ function openEditModal(id) {
   });
   $("#m-cancel").onclick = closeModal;
   $("#m-save").onclick = () => saveModal(item);
-  $("#m-delete").onclick = async () => {
-    if (!confirm("确定删除这张卡片？")) return;
-    await fetch(`/api/items/${id}`, { method: "DELETE" });
-    closeModal();
-    toast("已删除");
-    loadBootstrap().then(loadItems);
-  };
+  $("#m-delete").onclick = () => deleteItem(id, true);
 }
 
 function closeModal() {
+  settingsRequest++;
   const modal = $("#modal");
   modal.classList.add("hidden");
   modal.innerHTML = "";
 }
 
 /* ---------- 设置弹窗（API Key / Base URL / Model + 重跑提取） ---------- */
-function openSettings() {
-  Promise.all([fetch("/api/config").then((r) => r.json()), fetch("/api/articles").then((r) => r.json())]).then(
+function openSettings(section) {
+  const request = ++settingsRequest;
+  return Promise.all([requestJSON("/api/config"), requestJSON("/api/articles")]).then(
     ([c, articles]) => {
+      if (request !== settingsRequest) return;
       const modal = $("#modal");
       const rows = (Array.isArray(articles) ? articles : [])
         .map(
@@ -366,7 +425,7 @@ function openSettings() {
       <input type="text" id="s-base" value="${esc(c.baseUrl ?? "")}">
       <label>模型</label>
       <input type="text" id="s-model" value="${esc(c.model ?? "")}">
-      <div class="modal-hint">保存在本机配置文件中，不会上传。任何 OpenAI 兼容的多模态模型服务均可。</div>
+      <div class="modal-hint">配置保存在本机。分析时会将文章文字与图片发给你配置的模型服务商。</div>
       <h3 style="margin-top:18px">手机收集（收件箱）</h3>
       <div class="modal-hint">iPhone 快捷指令 POST 到 VPS，本机自动拉取拆卡。部署见 <code>inbox/README.md</code>。</div>
       <label>收件箱 URL</label>
@@ -374,9 +433,16 @@ function openSettings() {
       <label>Inbox Token ${c.inboxTokenSet ? "（已设置，留空则不改）" : "（必填）"}</label>
       <input type="password" id="s-inbox-token" placeholder="与 VPS 的 INBOX_TOKEN 相同" value="">
       <label style="display:flex;gap:8px;align-items:center;font-weight:400;margin-top:8px">
-        <input type="checkbox" id="s-inbox-enabled" ${c.inboxEnabled ? "checked" : ""}> 启用手机收集（每 30 秒拉取）
+        <input type="checkbox" id="s-inbox-enabled" ${c.inboxEnabled ? "checked" : ""}> 启用手机收集
       </label>
-      <div class="modal-hint" style="margin-top:12px">iPhone 快捷指令：「获取 URL」→「获取 URL 内容」POST <b>$(inboxUrl)/collect</b>，Header <code>Authorization: Bearer 你的token</code>，JSON body <code>{"url":"…"}</code>。分享菜单运行即可。</div>
+      <label for="s-inbox-interval">检查间隔（秒）</label>
+      <input type="number" id="s-inbox-interval" min="10" max="120" step="1" value="${esc(c.inboxIntervalSec ?? 30)}">
+      <div id="inbox-status" class="modal-hint" role="status"></div>
+      <div class="modal-hint" style="margin-top:12px">iPhone 快捷指令：POST 到收件箱 URL 下的 <code>/collect</code>，Header <code>Authorization: Bearer 你的token</code>，JSON body <code>{"url":"…"}</code>。服务器接收后会等待本机处理，接收成功不等于已经入库。</div>
+      <div class="task-heading"><h3>收集任务</h3><button class="mini-btn" id="tasks-refresh" type="button">刷新状态</button></div>
+      <div class="modal-hint">任务在后台处理，可关闭设置继续浏览。失败后可重试。</div>
+      <div id="tasks-list" class="task-list"></div>
+      <div id="inbox-failures" class="task-list"></div>
       <h3 style="margin-top:18px">重跑提取</h3>
       <div class="modal-hint">换模型后可对旧文章重新拆卡。将<strong>整篇替换</strong>该文全部卡片（含手改），需在线重抓原文。</div>
       <div style="max-height:180px;overflow:auto;border:1px solid var(--border,#ddd);border-radius:8px;padding:8px;margin-top:8px">
@@ -402,9 +468,109 @@ function openSettings() {
         const ids = [...document.querySelectorAll(".rep-check:checked")].map((b) => b.dataset.id);
         void confirmAndReprocess(ids);
       };
-      $("#s-key").focus();
+      $("#tasks-refresh").onclick = () => refreshTaskPanel();
+      renderTaskStatus();
+      void refreshTaskPanel();
+      if (section === "tasks") $("#tasks-list").scrollIntoView({ block: "center" });
+      else $("#s-key").focus();
     }
-  );
+  ).catch((error) => toast("无法打开设置：" + errorText(error)));
+}
+
+const TASK_LABEL = { queued: "等待处理", running: "正在处理", done: "已完成", failed: "失败可重试" };
+
+function displayTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function renderTaskStatus() {
+  const active = state.tasks.filter((task) => task.status === "queued" || task.status === "running").length;
+  const failed = state.tasks.filter((task) => task.status === "failed").length;
+  $("#tasks-btn").textContent = state.taskError ? "任务 · 状态不可用" : active ? `任务 · ${active} 条处理中` : failed ? `任务 · ${failed} 条失败` : "任务";
+  const list = $("#tasks-list");
+  if (!list) return;
+  list.innerHTML = (state.taskError ? `<div class="task-error" role="status">状态更新失败：${esc(state.taskError)}</div>` : "") +
+    (state.tasks.map((task) => `<div class="task-row">
+      <div class="task-info"><div class="task-title">${esc(task.title || task.url || "收集任务")}</div>
+      <div class="task-meta"><span class="task-state ${esc(task.status)}">${esc(TASK_LABEL[task.status] || "状态未知")}</span>${task.result?.skipped ? " · 已收藏，未重复分析" : ""}${task.source === "inbox" ? " · 手机收集" : ""}${task.updatedAt ? " · " + esc(displayTime(task.updatedAt)) : ""}</div>
+      ${task.error ? `<div class="task-error">${esc(errorText(task.error))}</div>` : ""}
+      ${task.status === "failed" && task.source === "inbox" ? `<div class="task-meta">手机收件箱会自动重试；最终失败后，可在下方重新排队。</div>` : ""}</div>
+      ${task.status === "failed" && task.source !== "inbox" ? `<button class="mini-btn" type="button" data-task-retry="${esc(task.id)}">重试</button>` : ""}
+    </div>`).join("") || `<div class="task-empty">暂无收集任务</div>`);
+  const inbox = state.inbox;
+  const connection = $("#inbox-status");
+  if (connection && inbox) {
+    const labels = { disabled: "未启用", idle: "等待连接", connected: "已连接", error: "连接失败" };
+    const status = !inbox.enabled ? "未启用" : !inbox.configured ? "尚未配置完整" : labels[inbox.connection] || "等待检查";
+    connection.textContent = `收件箱：${status}` +
+      (inbox.lastSuccessAt ? ` · 最近连通 ${displayTime(inbox.lastSuccessAt)}` : "") +
+      (inbox.pendingAckCount ? ` · ${inbox.pendingAckCount} 条处理结果等待服务器确认` : "") +
+      (inbox.lastError ? ` · ${errorText(inbox.lastError)}` : "");
+  }
+  const failures = $("#inbox-failures");
+  if (failures) failures.innerHTML = remoteFailureMessage ? `<div class="task-error">${esc(remoteFailureMessage)}</div>` :
+    remoteFailures.length ? `<div class="task-meta">手机收件箱中的失败条目</div>` + remoteFailures.map((item) => `<div class="task-row">
+      <div class="task-info"><div class="task-title">${esc(item.url)}</div><div class="task-error">${esc(errorText(item.error || "处理失败"))}</div></div>
+      <button class="mini-btn" type="button" data-inbox-retry="${esc(item.id)}">重新排队</button>
+    </div>`).join("") : "";
+}
+
+async function refreshTasks() {
+  if (taskPolling) return;
+  taskPolling = true;
+  try {
+    const data = await requestJSON("/api/tasks");
+    if (!Array.isArray(data.tasks)) throw new Error("任务状态返回格式不正确");
+    const nextSnapshot = new Map(data.tasks.map((task) => [task.id, `${task.status}:${task.updatedAt ?? ""}`]));
+    const completed = taskSnapshot ? data.tasks.filter((task) => task.status === "done" && taskSnapshot.get(task.id) !== nextSnapshot.get(task.id)) : [];
+    state.tasks = data.tasks;
+    state.inbox = data.inbox ?? null;
+    state.taskError = "";
+    renderTaskStatus();
+    if (completed.length) {
+      imgCache.clear();
+      await loadBootstrap();
+      await loadItems();
+      if (state.itemError) {
+        toast("任务已完成，卡片列表刷新失败，稍后会自动重试");
+        return;
+      }
+      toast(completed.every((task) => task.result?.skipped) ? "链接已收藏，无需重复分析" : "收集任务已完成，卡片已更新");
+    }
+    // A completed revision is consumed only after its cards have refreshed successfully.
+    taskSnapshot = nextSnapshot;
+  } catch (error) {
+    state.taskError = errorText(error);
+    renderTaskStatus();
+  } finally { taskPolling = false; }
+}
+
+async function refreshTaskPanel() {
+  const button = $("#tasks-refresh");
+  if (button) button.disabled = true;
+  await refreshTasks();
+  if (state.inbox?.configured) {
+    try {
+      const data = await requestJSON("/api/inbox/failed");
+      remoteFailures = Array.isArray(data.items) ? data.items : [];
+      remoteFailureMessage = data.supported === false ? "当前收件箱版本不支持查询失败条目，请更新服务器程序。" : "";
+    } catch (error) { remoteFailureMessage = "收件箱失败记录读取失败：" + errorText(error); }
+  } else { remoteFailures = []; remoteFailureMessage = ""; }
+  renderTaskStatus();
+  if (button?.isConnected) button.disabled = false;
+}
+
+async function retryTask(id, button, inbox = false) {
+  button.disabled = true;
+  try {
+    if (inbox) await requestJSON("/api/inbox/retry", jsonPost({ id }));
+    else await requestJSON(`/api/tasks/${encodeURIComponent(id)}/retry`, jsonPost({}));
+    toast(inbox ? "已重新排队，等待本机拉取处理" : "已重新排队，等待处理");
+    await refreshTaskPanel();
+  } catch (error) { toast("重试未成功：" + errorText(error)); }
+  finally { if (button.isConnected) button.disabled = false; }
 }
 
 async function confirmAndReprocess(ids) {
@@ -521,33 +687,44 @@ document.addEventListener("click", (e) => {
 window.addEventListener("blur", closeArticleMenu);
 
 async function saveSettings() {
+  const button = $("#s-save");
+  if (button.disabled) return;
   const apiKey = $("#s-key").value.trim();
   const baseUrl = $("#s-base").value.trim();
   const model = $("#s-model").value.trim();
   const inboxUrl = $("#s-inbox-url").value.trim();
   const inboxToken = $("#s-inbox-token").value.trim();
   const inboxEnabled = $("#s-inbox-enabled").checked;
+  const inboxIntervalSec = Number($("#s-inbox-interval").value);
+  if (!Number.isInteger(inboxIntervalSec) || inboxIntervalSec < 10 || inboxIntervalSec > 120) {
+    toast("检查间隔需为 10–120 秒的整数");
+    return;
+  }
   const patch = {
     baseUrl,
     model,
     inboxUrl,
     inboxEnabled,
+    inboxIntervalSec,
   };
   if (apiKey) patch.apiKey = apiKey;
   if (inboxToken) patch.inboxToken = inboxToken;
-  const r = await fetch("/api/config", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  });
-  const saved = await r.json();
-  closeModal();
-  toast(saved.hasKey ? "已保存 ✔" : "已保存，但 API Key 为空");
+  button.disabled = true;
+  try {
+    const saved = await requestJSON("/api/config", jsonPost(patch));
+    closeModal();
+    toast(saved.hasKey ? "已保存 ✔" : "已保存，但 API Key 为空");
+    void refreshTasks();
+  } catch (error) { toast("保存失败：" + errorText(error)); }
+  finally { if (button.isConnected) button.disabled = false; }
 }
 
 $("#settings-btn").addEventListener("click", openSettings);
+$("#tasks-btn").addEventListener("click", () => openSettings("tasks"));
 
 async function saveModal(item) {
+  const button = $("#m-save");
+  if (button.disabled) return;
   const title = $("#f-title").value.trim();
   let payload;
   if (item.type === "palette") {
@@ -575,26 +752,34 @@ async function saveModal(item) {
     }
     payload = { sections };
   }
-  await fetch(`/api/items/${item.id}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, payload }),
-  });
-  closeModal();
-  toast("已保存 ✔");
-  loadItems();
+  button.disabled = true;
+  try {
+    await requestJSON(`/api/items/${encodeURIComponent(item.id)}`, { ...jsonPost({ title, payload }), method: "PATCH" });
+    closeModal();
+    toast("已保存 ✔");
+    await loadItems();
+  } catch (error) { toast("保存失败：" + errorText(error)); }
+  finally { if (button.isConnected) button.disabled = false; }
 }
 
-async function deleteItem(id) {
+async function deleteItem(id, fromModal = false) {
   if (!confirm("确定删除这张卡片？")) return;
-  await fetch(`/api/items/${id}`, { method: "DELETE" });
-  toast("已删除");
-  loadBootstrap().then(loadItems);
+  try {
+    await requestJSON(`/api/items/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (fromModal) closeModal();
+    toast("已删除");
+    await loadBootstrap();
+    await loadItems();
+  } catch (error) { toast("删除失败：" + errorText(error)); }
 }
 
 /* ---------- 事件 ---------- */
 document.addEventListener("click", async (e) => {
   const t = e.target;
+
+  const retry = t.closest("[data-task-retry], [data-inbox-retry]");
+  if (retry) { await retryTask(retry.dataset.taskRetry || retry.dataset.inboxRetry, retry, !!retry.dataset.inboxRetry); return; }
+  if (t.closest("[data-reload-items]")) { await loadItems(); return; }
 
   const copyEl = t.closest("[data-copy]");
   if (copyEl) {
@@ -708,37 +893,33 @@ async function doIngest() {
   const input = $("#ingest-input");
   const btn = $("#ingest-btn");
   const url = input.value.trim();
-  if (!url.includes("mp.weixin.qq.com")) { toast("请粘贴微信公众号文章链接"); return; }
-  btn.disabled = true;
-  btn.textContent = "提取中…";
+  if (btn.disabled) return;
   try {
-    const r = await fetch("/api/ingest", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
-    const data = await r.json();
-    if (data.error) toast("✘ " + data.error);
-    else {
-      const counts = Object.entries(data.counts).map(([k, v]) => `${TYPE_LABEL[k]}×${v}`).join("，");
-      toast(`✔ ${counts || "未提取到卡片"}${data.unsureCount ? `（${data.unsureCount} 待核对）` : ""}`);
-      input.value = "";
-      imgCache.clear();
-      await loadBootstrap();
-      await loadItems();
-    }
+    const parsed = new URL(url);
+    if (parsed.hostname !== "mp.weixin.qq.com" || !["https:", "http:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error();
+  } catch { toast("请粘贴微信公众号文章链接"); return; }
+  btn.disabled = true;
+  btn.textContent = "提交中…";
+  try {
+    const data = await requestJSON("/api/tasks", jsonPost({ url }));
+    if (!data.task?.id) throw new Error("服务未返回收集任务，请刷新任务状态确认");
+    if (input.value.trim() === url) input.value = "";
+    toast(data.task.status === "done" ? (data.task.result?.skipped ? "链接已收藏，无需重复分析" : "该收集任务已完成") : data.task.status === "running" ? "该链接正在处理，可继续浏览" : "已加入队列，等待处理");
+    void refreshTasks();
   } catch (err) {
-    toast("✘ " + err.message);
+    toast("提交失败：" + errorText(err));
   } finally {
     btn.disabled = false;
     btn.textContent = "收集";
   }
 }
 
-loadBootstrap().then(() => {
-  loadItems();
+loadBootstrap().then(async () => {
+  await refreshTasks();
+  await loadItems();
+  setInterval(() => { if (!document.hidden) void refreshTasks(); }, 3000);
   // 首次使用：未配置 key 时自动弹出设置
-  fetch("/api/config").then((r) => r.json()).then((c) => {
+  requestJSON("/api/config").then((c) => {
     if (!c.hasKey) { openSettings(); toast("请先配置 API Key"); }
-  });
-});
+  }).catch((error) => toast("配置读取失败：" + errorText(error)));
+}).catch((error) => toast("启动加载失败：" + errorText(error)));

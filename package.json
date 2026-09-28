@@ -1,11 +1,13 @@
 {
   "name": "inspiration-collector",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "src-electron/main.mjs",
   "scripts": {
-    "app": "electron .",
+    "app": "npm run build:core && electron .",
+    "test": "node scripts/test.mjs",
+    "typecheck": "tsc --noEmit",
     "build:core": "tsc -p tsconfig.build.json",
     "dist": "npm run build:core && electron-builder --win",
     "ingest": "tsx cli.ts ingest",

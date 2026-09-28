@@ -3,6 +3,8 @@ dist/
 data/
 assets/
 release/
+release-*/
+docs/research/
 .env
 .zcode/
 STATE.md

@@ -86,11 +86,13 @@ export function getDb(): DatabaseSync {
   return db;
 }
 
-export function upsertArticle(a: {
+export interface ArticleInput {
   id: string; url: string; title: string; account: string; publishDate: string;
   description: string; summary?: string; articleType?: string; tags?: string[];
   imagesDir?: string; status?: string; error?: string; processed?: boolean;
-}): void {
+}
+
+export function upsertArticle(a: ArticleInput): void {
   getDb().prepare(`
     INSERT INTO articles (id, url, title, account, publish_date, description, summary, article_type, tags, images_dir, status, error, fetched_at, processed_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -109,7 +111,8 @@ export function upsertArticle(a: {
 
 export function replaceItems(articleId: string, items: ExtractedItem[], verifyResults: Map<string, { status: string; detail: unknown }>, articleTags: string[] = []): number {
   const d = getDb();
-  d.exec("BEGIN");
+  // A savepoint supports both standalone replacement and the outer article transaction.
+  d.exec("SAVEPOINT replace_items");
   try {
     d.prepare("DELETE FROM items WHERE article_id = ?").run(articleId);
     const ins = d.prepare(`
@@ -127,12 +130,27 @@ export function replaceItems(articleId: string, items: ExtractedItem[], verifyRe
         it.bbox?.length === 4 ? JSON.stringify(it.bbox) : "", now
       );
     }
+    d.exec("RELEASE SAVEPOINT replace_items");
+  } catch (e) {
+    d.exec("ROLLBACK TO SAVEPOINT replace_items");
+    d.exec("RELEASE SAVEPOINT replace_items");
+    throw e;
+  }
+  return items.length;
+}
+
+/** Commit one complete extraction atomically, including its image-directory pointer. */
+export function replaceArticle(a: ArticleInput, items: ExtractedItem[], verifyResults: Map<string, { status: string; detail: unknown }>): void {
+  const d = getDb();
+  d.exec("BEGIN IMMEDIATE");
+  try {
+    upsertArticle(a);
+    replaceItems(a.id, items, verifyResults);
     d.exec("COMMIT");
   } catch (e) {
     d.exec("ROLLBACK");
     throw e;
   }
-  return items.length;
 }
 
 function itemKey(it: ExtractedItem): string {
@@ -159,11 +177,19 @@ export function deleteItem(id: string): void {
 /** 删除文章及其全部卡片 */
 export function deleteArticle(articleId: string): void {
   const d = getDb();
-  d.prepare("DELETE FROM items WHERE article_id = ?").run(articleId);
-  d.prepare("DELETE FROM articles WHERE id = ?").run(articleId);
+  d.exec("BEGIN IMMEDIATE");
+  try {
+    d.prepare("DELETE FROM items WHERE article_id = ?").run(articleId);
+    d.prepare("DELETE FROM articles WHERE id = ?").run(articleId);
+    d.exec("COMMIT");
+  } catch (e) {
+    d.exec("ROLLBACK");
+    throw e;
+  }
 }
 
 export interface ItemFilter {
+  articleId?: string;
   type?: string;
   tag?: string;
   q?: string;
@@ -175,6 +201,7 @@ export interface ItemFilter {
 function buildWhere(f: ItemFilter): { sql: string; vals: string[] } {
   const where: string[] = [];
   const vals: string[] = [];
+  if (f.articleId) { where.push("article_id = ?"); vals.push(f.articleId); }
   if (f.type && f.type !== "all") { where.push("type = ?"); vals.push(f.type); }
   if (f.verify) { where.push("verify_status = ?"); vals.push(f.verify); }
   if (f.tag) { where.push("tags LIKE ?"); vals.push(`%"${f.tag}"%`); }

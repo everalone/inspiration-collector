@@ -11,9 +11,10 @@
   <div class="brand-row">
     <h1>灵感收集</h1>
     <button class="mini-btn" id="settings-btn">⚙ 设置</button>
+    <button class="mini-btn" id="tasks-btn" aria-live="polite">任务</button>
   </div>
   <div class="ingest-bar">
-    <input id="ingest-input" type="text" placeholder="粘贴微信公众号文章链接，自动整理入库…">
+    <input id="ingest-input" type="text" placeholder="粘贴微信公众号文章链接，加入后台收集队列…">
     <button id="ingest-btn">收集</button>
   </div>
   <input id="search" type="search" placeholder="搜索标题 / 内容 / 公众号…">
@@ -26,7 +27,7 @@
   <section id="detail"><div class="empty">选择左侧卡片查看详情</div></section>
 </main>
 
-<div id="toast" class="toast hidden"></div>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 <div id="lightbox" class="lightbox hidden">
   <img id="lightbox-img" src="" alt="来源原图">
 </div>

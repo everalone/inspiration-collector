@@ -70,6 +70,7 @@ function clampItems(raw: unknown, imageCount: number): ExtractedItem[] {
   const out: ExtractedItem[] = [];
   const validTypes: ItemType[] = ["palette", "website", "repo", "prompt", "note"];
   for (const it of raw as Record<string, unknown>[]) {
+    if (!it || typeof it !== "object") continue;
     const type = it.type as ItemType;
     if (!validTypes.includes(type)) continue;
     const title = String(it.title ?? "").trim() || "未命名";
@@ -152,13 +153,21 @@ ${SCHEMA_PROMPT}
 注意：source_image_index 请使用全局编号（当前批次的图片全局编号已给出）。`;
 
   const raw = await chatVision(SYSTEM, userText, images);
+  if (raw.finishReason === "length") throw new Error("模型输出被截断，请提高输出上限后重试");
   const parsed = parseJsonLoose(raw.content) as Record<string, unknown>;
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.items)) {
+    throw new Error("模型结果无效：items 必须为数组，未替换已有内容");
+  }
+  const items = clampItems(parsed.items, batchOffset + images.length);
+  if (items.length !== parsed.items.length) {
+    throw new Error("模型结果包含无效卡片，未替换已有内容");
+  }
   const types: ItemType[] = ["palette", "website", "repo", "prompt", "note"];
   return {
     articleType: types.includes(parsed.article_type as ItemType) ? (parsed.article_type as ItemType) : "note",
     articleSummary: String(parsed.article_summary ?? "").slice(0, 100),
     tags: Array.isArray(parsed.tags) ? parsed.tags.map(String).filter(Boolean).slice(0, 6) : [],
-    items: clampItems(parsed.items, batchOffset + images.length),
+    items,
   };
 }
 

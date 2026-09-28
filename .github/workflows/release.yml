@@ -33,10 +33,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify regressions
+        run: |
+          npm run typecheck
+          npm test
+
       - name: Build Windows packages
         run: |
           npm run build:core
           npx electron-builder --win --publish never
+
+      - name: Check package privacy boundary
+        run: node scripts/check-package.mjs release/win-unpacked/resources/app.asar
+
+      - name: Verify packaged runtime
+        shell: pwsh
+        run: |
+          $env:ELECTRON_RUN_AS_NODE = '1'
+          & './release/win-unpacked/灵感收集.exe' scripts/check-runtime.mjs release/win-unpacked/resources/app.asar
+          exit $LASTEXITCODE
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -45,4 +60,4 @@ jobs:
             release/InspirationCollector-Setup-*.exe
             release/InspirationCollector-Portable-*.exe
             release/latest.yml
-          generate_release_notes: true
+          body_path: docs/releases/${{ github.ref_name }}.md
