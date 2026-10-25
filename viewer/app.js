@@ -479,6 +479,26 @@ function openSettings(section) {
 
 const TASK_LABEL = { queued: "等待处理", running: "正在处理", done: "已完成", failed: "失败可重试" };
 
+const FAILURE_REASON = { invalid_type: "卡片类型不受支持", missing_value: "缺少必填内容", invalid_format: "格式不正确", invalid_url: "不是有效的 HTTP(S) 网址", invalid_color: "不是有效的十六进制颜色", invalid_shape: "字段结构不正确", invalid_json: "模型未返回有效 JSON", truncated: "模型输出被截断" };
+function failureReportHtml(report) {
+  if (!report || report.version !== 1 || !Array.isArray(report.issues)) return "";
+  const context = [report.batch ? `第 ${report.batch} 批` : "", report.imageStart ? `原文图片 ${report.imageStart}–${report.imageEnd}` : ""].filter(Boolean).join(" · ");
+  const issues = report.issues.slice(0, 10).map(issue => `<li>${esc(issue.cardIndex ? `第 ${issue.cardIndex} 张卡` : "模型响应")}${issue.cardTitle ? `《${esc(errorText(issue.cardTitle))}》` : ""}${issue.cardType ? `（${esc(issue.cardType)}）` : ""}：<code>${esc(issue.field)}</code> — ${esc(FAILURE_REASON[issue.code] || "校验失败")}</li>`).join("");
+  return `<details class="task-report" open><summary>失败报告${context ? " · " + esc(context) : ""}</summary><ul>${issues}</ul>${report.issueCount > 10 ? `<div>另有 ${esc(report.issueCount - 10)} 项问题</div>` : ""}<div>未替换已有内容。</div></details>`;
+}
+function inboxAttemptText(task) {
+  if (task.source !== "inbox") return "";
+  const laterSuccess = state.tasks.some(other => other.url === task.url && other.status === "done" && other.updatedAt > task.updatedAt);
+  if (task.status === "failed" && laterSuccess) return "先前尝试失败，后续已成功导入，无需重试。";
+  const attempt = task.inbox?.attempt;
+  const max = task.inbox?.maxAttempts || 3;
+  const remote = remoteFailures.find(item => (task.inbox?.id ? item.id === task.inbox.id : item.url === task.url) &&
+    (!task.inbox?.generation || !item.generation || task.inbox.generation === item.generation));
+  if (task.status === "failed" && (attempt >= max || remote)) return `本轮已尝试 ${remote?.attempts || attempt || max}/${remote?.maxAttempts || max} 次，已停止自动重试。修正后可在下方手动重新排队。`;
+  if (attempt) return `本轮第 ${attempt}/${max} 次${task.status === "failed" ? "失败；等待自动重试。" : task.status === "done" ? "完成。" : "处理。"}`;
+  return task.status === "failed" ? "本次处理失败；手机任务每轮最多尝试 3 次，最终失败条目见下方。" : "";
+}
+
 function displayTime(value) {
   if (!value) return "";
   const date = new Date(value);
@@ -495,8 +515,8 @@ function renderTaskStatus() {
     (state.tasks.map((task) => `<div class="task-row">
       <div class="task-info"><div class="task-title">${esc(task.title || task.url || "收集任务")}</div>
       <div class="task-meta"><span class="task-state ${esc(task.status)}">${esc(TASK_LABEL[task.status] || "状态未知")}</span>${task.result?.skipped ? " · 已收藏，未重复分析" : ""}${task.source === "inbox" ? " · 手机收集" : ""}${task.updatedAt ? " · " + esc(displayTime(task.updatedAt)) : ""}</div>
-      ${task.error ? `<div class="task-error">${esc(errorText(task.error))}</div>` : ""}
-      ${task.status === "failed" && task.source === "inbox" ? `<div class="task-meta">手机收件箱会自动重试；最终失败后，可在下方重新排队。</div>` : ""}</div>
+      ${task.failureReport ? failureReportHtml(task.failureReport) : task.error ? `<div class="task-error">${esc(errorText(task.error))}</div>` : ""}
+      ${inboxAttemptText(task) ? `<div class="task-meta">${esc(inboxAttemptText(task))}</div>` : ""}</div>
       ${task.status === "failed" && task.source !== "inbox" ? `<button class="mini-btn" type="button" data-task-retry="${esc(task.id)}">重试</button>` : ""}
     </div>`).join("") || `<div class="task-empty">暂无收集任务</div>`);
   const inbox = state.inbox;
@@ -512,8 +532,8 @@ function renderTaskStatus() {
   const failures = $("#inbox-failures");
   if (failures) failures.innerHTML = remoteFailureMessage ? `<div class="task-error">${esc(remoteFailureMessage)}</div>` :
     remoteFailures.length ? `<div class="task-meta">手机收件箱中的失败条目</div>` + remoteFailures.map((item) => `<div class="task-row">
-      <div class="task-info"><div class="task-title">${esc(item.url)}</div><div class="task-error">${esc(errorText(item.error || "处理失败"))}</div></div>
-      <button class="mini-btn" type="button" data-inbox-retry="${esc(item.id)}">重新排队</button>
+      <div class="task-info"><div class="task-title">${esc(item.failureReport?.articleTitle || item.url)}</div><div class="task-meta">已尝试 ${esc(item.attempts)}/${esc(item.maxAttempts || 3)} 次，已停止自动重试。</div>${item.failureReport ? failureReportHtml(item.failureReport) : `<div class="task-error">${esc(errorText(item.error || "处理失败"))}</div>`}</div>
+      <button class="mini-btn" type="button" data-inbox-retry="${esc(item.id)}">重新排队（新一轮）</button>
     </div>`).join("") : "";
 }
 

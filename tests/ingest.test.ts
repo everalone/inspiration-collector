@@ -50,6 +50,7 @@ test("ordinary ingest skips an existing article without network calls or edited-
   html = page("skip-existing");
   const result = await ingest("https://mp.weixin.qq.com/s/skip-existing");
   assert.equal(result.skipped, true);
+  assert.equal(result.title, "old title", "the inbox completion receipt must identify articles already in the library");
   assert.deepEqual(requests, []);
   assert.equal(store.getArticle("skip-existing")?.title, "old title");
 });
@@ -122,4 +123,25 @@ test("failed incomplete model output releases the article lock and preserves the
   await ingest("https://mp.weixin.qq.com/s/retry-result", { refresh: true });
   assert.equal(store.listItems({ articleId: "retry-result" })[0]?.title, "valid");
   assert.notEqual(store.getArticle("retry-result")?.images_dir, "retry-result");
+});
+
+test("mixed valid and malformed cards reject the whole refresh and preserve the saved article", async () => {
+  seed("mixed-invalid");
+  const dirsBefore = fs.readdirSync(ASSETS_DIR).sort();
+  html = page("mixed-invalid");
+  model = { article_type: "palette", items: [
+    { type: "prompt", title: "valid candidate", payload: { text: "must not replace saved cards" } },
+    { type: "palette", title: "incomplete palette", colors: [{ hex: "#123" }, { hex: "red" }] },
+  ] };
+  await assert.rejects(ingest("https://mp.weixin.qq.com/s/mixed-invalid", { refresh: true }), (error: any) => {
+    assert.equal(error.failureReport.stage, "card_validation");
+    assert.equal(error.failureReport.issues[0].cardIndex, 2);
+    assert.equal(error.failureReport.issues[0].field, "payload.colors[1].hex");
+    return true;
+  });
+  assert.equal(store.getArticle("mixed-invalid")?.title, "old title");
+  assert.equal(store.getArticle("mixed-invalid")?.images_dir, "mixed-invalid");
+  assert.equal(store.listItems({ articleId: "mixed-invalid" })[0]?.title, "hand edited");
+  assert.deepEqual(fs.readdirSync(ASSETS_DIR).sort(), dirsBefore);
+  assert.equal(requests.filter(url => url.includes("/chat/completions")).length, 1);
 });

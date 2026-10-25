@@ -8,6 +8,8 @@ commits: b66ef2188a02b3904ddebb535d0f1e81ccde6636..0ed4043
 
 # 手机转发自动收集（VPS 收件箱）
 
+> 本文保留 2026-09-22 首版实现的历史设计与验收记录。当前协议、去重和重试行为见 [收件箱文档](../../../inbox/README.md)，ClawBot 文本链接接入及标题通知见 [ClawBot 指南](../../../inbox/clawbot.md)；首版的强制重跑、双轮询与未部署状态不再代表当前实现。
+
 ## Report
 
 **What was built** — 手机在外也可把公众号文章链接送进灵感收集：VPS 上可部署的 `inbox/` 收件箱（Bearer token，只收 `mp.weixin.qq.com/s/`，24h 去重，JSONL 持久化，`/collect` `/pull` `/ack` `/health`）；桌面应用 ⚙ 配置 `inboxUrl`/`inboxToken`/`inboxEnabled`/`inboxIntervalSec`（10–120s），轮询或 Electron 定时 `drain` 后走既有 `ingest(refresh)` 全自动拆卡并系统通知（含卡片数）；`cli.ts inbox-pull` 可无 GUI 拉取；README + 设置页提供 iPhone 快捷指令（POST `/collect`）说明；`inbox/Caddyfile` + systemd 示例供 VPS HTTPS 部署。入队用进程内互斥避免并发同链双队列；默认只绑 `127.0.0.1` 由 Caddy 反代。

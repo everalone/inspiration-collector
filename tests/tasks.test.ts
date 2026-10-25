@@ -4,12 +4,53 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createTaskQueue, normalizeArticleUrl } from '../core/tasks.js';
+import { CollectionFailure, sanitizeFailureReport, type FailureReport } from '../core/failure-report.js';
 
 function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inspiration-tasks-'));
   return { dir, filePath: path.join(dir, 'tasks.json') };
 }
 const result = (title: string) => ({ articleId: title, title, account: '', articleType: 'note', summary: '', tags: [], counts: { note: 1 }, unsureCount: 0, items: [] });
+
+test('same inbox generation and attempt replays a persisted failure after restart without analysis', async () => {
+  const { filePath } = fixture(); let calls = 0;
+  const process = async () => { calls++; throw new Error('invalid cards'); };
+  const queue = createTaskQueue({ filePath, process });
+  const context = { id: 'remote', generation: 'round-one', attempt: 1, maxAttempts: 3 };
+  const task = queue.enqueue('https://mp.weixin.qq.com/s/crash-before-receipt', 'inbox', false, context);
+  await assert.rejects(queue.wait(task.id));
+  const restarted = createTaskQueue({ filePath, process });
+  const replayed = restarted.enqueue(task.url, 'inbox', false, context);
+  assert.equal(replayed.id, task.id);
+  await assert.rejects(restarted.wait(replayed.id));
+  assert.equal(calls, 1);
+  const nextRound = restarted.enqueue(task.url, 'inbox', false, { ...context, generation: 'round-two' });
+  assert.notEqual(nextRound.id, task.id);
+  await assert.rejects(restarted.wait(nextRound.id));
+  assert.equal(calls, 2);
+});
+
+test('failure report survives task persistence and wait rejection without exposing secrets', async () => {
+  const { filePath } = fixture();
+  const report: FailureReport = { version: 1, stage: 'card_validation', articleTitle: 'Article private-key', batch: 2,
+    issues: [{ cardIndex: 4, cardTitle: 'Icon', field: 'payload.url', code: 'missing_value' }], issueCount: 1 };
+  const queue = createTaskQueue({ filePath, process: async () => { throw new CollectionFailure(report); },
+    sanitizeError: error => String(error).replaceAll('private-key', '[hidden]'), sanitizeReport: value => sanitizeFailureReport(value, ['private-key']) });
+  const task = queue.enqueue('https://mp.weixin.qq.com/s/structured', 'inbox', false, { id: 'remote', attempt: 3, maxAttempts: 3 });
+  await assert.rejects(queue.wait(task.id), error => {
+    assert.ok(error instanceof CollectionFailure);
+    assert.equal(error.failureReport.issues[0].cardIndex, 4);
+    return true;
+  });
+  assert.doesNotMatch(fs.readFileSync(filePath, 'utf8'), /private-key/);
+  const restarted = createTaskQueue({ filePath, process: async () => { throw new Error('must not run'); } });
+  await assert.rejects(restarted.wait(task.id), error => {
+    assert.ok(error instanceof CollectionFailure);
+    assert.equal(error.failureReport.issues[0].field, 'payload.url');
+    return true;
+  });
+  assert.equal(restarted.list()[0].inbox?.attempt, 3);
+});
 
 test('overlapping submissions are queued without dropping links, and duplicates share active work', async () => {
   const { filePath } = fixture();

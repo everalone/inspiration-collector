@@ -34,6 +34,21 @@ function harness() {
 
 const card = (id) => ({ id, article_id: "article", type: "note", title: id, payload: "{}" });
 
+test("failure panel identifies card fields, escapes titles, and stops promising retries at the limit", () => {
+  const h = harness();
+  h.add('#tasks-list'); h.add('#inbox-failures');
+  h.run(`state.tasks = [{ id:'task', url:'article', source:'inbox', status:'failed', updatedAt:'2026-10-25T10:00:00Z', inbox:{id:'remote',attempt:3,maxAttempts:3},
+    failureReport:{version:1,stage:'card_validation',batch:2,imageStart:9,imageEnd:15,issueCount:1,issues:[{cardIndex:4,cardTitle:'<script>bad</script>',cardType:'website',field:'payload.url',code:'invalid_url'}]}}]; renderTaskStatus();`);
+  const markup = h.elements.get('#tasks-list').innerHTML;
+  assert.match(markup, /第 2 批/);
+  assert.match(markup, /第 4 张卡/);
+  assert.match(markup, /payload.url/);
+  assert.match(markup, /已停止自动重试/);
+  assert.doesNotMatch(markup, /<script>|等待自动重试/);
+  h.run(`state.tasks.push({id:'success',url:'article',status:'done',updatedAt:'2026-10-25T10:01:00Z'}); renderTaskStatus();`);
+  assert.match(h.elements.get('#tasks-list').innerHTML, /后续已成功导入/);
+});
+
 test("card pagination loads beyond 500 and preserves filters on every page", async () => {
   const h = harness();
   const cards = Array.from({ length: 603 }, (_, i) => card(String(i)));
@@ -215,6 +230,6 @@ test("inbox failures can only be retried through the inbox, while manual failure
   const tasks = h.elements.get("#tasks-list").innerHTML;
   assert.doesNotMatch(tasks, /data-task-retry="inbox-task"/);
   assert.match(tasks, /data-task-retry="manual-task"/);
-  assert.match(tasks, /手机收件箱会自动重试/);
+  assert.match(tasks, /已停止自动重试/);
   assert.match(h.elements.get("#inbox-failures").innerHTML, /data-inbox-retry="remote-id"/);
 });

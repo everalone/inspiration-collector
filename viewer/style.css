@@ -261,6 +261,10 @@ nav { display: flex; gap: 6px; flex-wrap: wrap; }
 /* 收集任务沿用设置中的轻量列表 */
 .list-status { padding: 7px 4px 12px; font-size: 12px; color: var(--muted); }
 .load-error, .task-error { color: #b91c1c; font-size: 12px; overflow-wrap: anywhere; }
+.task-report { color: #b91c1c; font-size: 12px; overflow-wrap: anywhere; margin: 6px 0; }
+.task-report summary { cursor: pointer; }
+.task-report ul { padding-left: 20px; margin: 6px 0; }
+.task-report li { margin: 4px 0; }
 .task-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 18px; }
 .task-heading h3 { margin: 0; }
 .task-list { max-height: 240px; overflow-y: auto; margin-top: 8px; }

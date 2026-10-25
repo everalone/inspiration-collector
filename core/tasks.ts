@@ -3,6 +3,9 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { DATA_DIR, loadConfig } from "./config.js";
 import type { IngestResult } from "./ingest.js";
+import { CollectionFailure, failureReportFromError, sanitizeFailureReport, type FailureReport } from "./failure-report.js";
+
+export interface InboxAttempt { id: string; attempt: number; maxAttempts: number; generation?: string }
 
 export interface CollectionTask {
   id: string;
@@ -15,6 +18,8 @@ export interface CollectionTask {
   updatedAt: string;
   title?: string;
   error?: string;
+  failureReport?: FailureReport;
+  inbox?: InboxAttempt;
   result?: IngestResult;
 }
 
@@ -50,6 +55,7 @@ export function createTaskQueue(options: {
   filePath: string;
   process: (url: string, options: { refresh: boolean }) => Promise<IngestResult>;
   sanitizeError?: (error: unknown) => string;
+  sanitizeReport?: (report: unknown) => FailureReport | undefined;
 }) {
   let tasks: CollectionTask[] = [];
   let running = false;
@@ -61,6 +67,7 @@ export function createTaskQueue(options: {
       throw new Error("任务记录损坏，请保留任务文件并反馈，未清空原记录");
     }
     tasks = stored as CollectionTask[];
+    for (const task of tasks) task.failureReport = (options.sanitizeReport ?? sanitizeFailureReport)(task.failureReport);
     for (const task of tasks) if (task.status === "running") {
       task.status = task.refresh ? "failed" : "queued";
       if (task.refresh) task.error = "上次重跑被中断，请查看已有卡片后决定是否重试";
@@ -74,6 +81,8 @@ export function createTaskQueue(options: {
     fs.renameSync(`${options.filePath}.tmp`, options.filePath);
   };
   const sanitize = options.sanitizeError ?? ((e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 500));
+  const sanitizeReport = options.sanitizeReport ?? sanitizeFailureReport;
+  const taskError = (task: CollectionTask): Error => task.failureReport ? new CollectionFailure(task.failureReport) : new Error(task.error);
   async function pump() {
     if (running) return;
     running = true;
@@ -89,15 +98,18 @@ export function createTaskQueue(options: {
           task.title = task.result.title;
           task.status = "done";
           delete task.error;
+          delete task.failureReport;
         } catch (e) {
           task.status = "failed";
           task.error = sanitize(e);
+          task.failureReport = sanitizeReport(failureReportFromError(e));
+          if (task.failureReport?.articleTitle) task.title = task.failureReport.articleTitle;
         }
         task.updatedAt = new Date().toISOString();
         persist();
         for (const waiter of waiters.get(task.id) ?? []) {
           if (task.status === "done") waiter.resolve(task.result!);
-          else waiter.reject(new Error(task.error));
+          else waiter.reject(taskError(task));
         }
         waiters.delete(task.id);
       }
@@ -123,12 +135,21 @@ export function createTaskQueue(options: {
     }
   }
   const start = () => queueMicrotask(() => void pump());
-  const enqueue = (input: string, source = "manual", refresh = false) => {
+  const enqueue = (input: string, source = "manual", refresh = false, inbox?: InboxAttempt) => {
     const url = normalizeArticleUrl(input);
+    // A durable outcome can outlive the process before its ACK receipt is saved.
+    // Replay that outcome for the same server attempt rather than paying again.
+    // A manual new round has a new generation and is intentionally distinct.
+    if (inbox?.generation) {
+      const previousAttempt = tasks.find(t => t.url === url && t.source === "inbox" && t.inbox?.id === inbox.id &&
+        t.inbox?.generation === inbox.generation && t.inbox?.attempt === inbox.attempt);
+      if (previousAttempt) return { ...previousAttempt };
+    }
     const existing = tasks.find(t => t.url === url && t.refresh === refresh && ["queued", "running"].includes(t.status));
     if (existing) return { ...existing };
     const now = new Date().toISOString();
-    const task: CollectionTask = { id: crypto.randomUUID(), url, source, refresh, status: "queued", attempts: 0, createdAt: now, updatedAt: now };
+    const task: CollectionTask = { id: crypto.randomUUID(), url, source, refresh, status: "queued", attempts: 0, createdAt: now, updatedAt: now,
+      ...(inbox ? { inbox: { ...inbox } } : {}) };
     tasks.push(task);
     try { persist(); } catch (e) { tasks = tasks.filter(t => t !== task); throw e; }
     start();
@@ -138,7 +159,7 @@ export function createTaskQueue(options: {
     const task = tasks.find(t => t.id === id);
     if (!task) return Promise.reject(new Error("任务不存在"));
     if (task.status === "done") return Promise.resolve(task.result!);
-    if (task.status === "failed") return Promise.reject(new Error(task.error));
+    if (task.status === "failed") return Promise.reject(taskError(task));
     return new Promise((resolve, reject) => {
       waiters.set(id, [...(waiters.get(id) ?? []), { resolve, reject }]);
       start();
@@ -154,6 +175,7 @@ export function createTaskQueue(options: {
     task.status = "queued";
     task.updatedAt = new Date().toISOString();
     delete task.error;
+    delete task.failureReport;
     try { persist(); } catch (e) { Object.assign(task, previous); throw e; }
     start();
     return { ...task };
@@ -167,11 +189,15 @@ export function getTaskQueue() {
     filePath: path.join(DATA_DIR, "tasks.json"),
     process: async (url, opts) => (await import("./ingest.js")).ingest(url, opts),
     sanitizeError: redactTaskError,
+    sanitizeReport: report => {
+      const cfg = loadConfig();
+      return sanitizeFailureReport(report, [cfg.apiKey, cfg.inboxToken]);
+    },
   });
 }
-export async function runCollection(url: string, source = "manual"): Promise<IngestResult> {
+export async function runCollection(url: string, source = "manual", inbox?: InboxAttempt): Promise<IngestResult> {
   const queue = getTaskQueue();
-  return queue.wait(queue.enqueue(url, source).id);
+  return queue.wait(queue.enqueue(url, source, false, inbox).id);
 }
 export async function runReprocess(url: string): Promise<IngestResult> {
   const queue = getTaskQueue();

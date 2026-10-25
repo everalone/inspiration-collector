@@ -4,18 +4,24 @@ import crypto from "node:crypto";
 import { DATA_DIR, loadConfig } from "./config.js";
 import type { Config } from "./config.js";
 import type { IngestResult } from "./ingest.js";
+import { failureReportFromError, sanitizeFailureReport, type FailureReport } from "./failure-report.js";
+import type { InboxAttempt } from "./tasks.js";
 
 export interface InboxItem {
   id: string;
   url: string;
   received_at: string;
   note?: string;
+  attempts?: number;
+  maxAttempts?: number;
+  generation?: string;
 }
 
 export interface InboxFailure extends InboxItem {
   attempts: number;
   error?: string;
   last_attempt_at?: string;
+  failureReport?: FailureReport;
 }
 
 export interface InboxStatus {
@@ -34,13 +40,22 @@ type Connection = { base: string; token: string };
 interface AckReceipt {
   endpoint: string;
   id: string;
+  generation?: string;
   ok: boolean;
+  title?: string;
   error?: string;
+  failureReport?: FailureReport;
   receiptId: string;
   createdAt: string;
   attempts: number;
   nextAttemptAt: number;
   lastError?: string;
+}
+
+function receiptTitle(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, " ").replace(/\s+/g, " ").trim();
+  return normalized ? Array.from(normalized).slice(0, 200).join("") : undefined;
 }
 
 class InboxHttpError extends Error {
@@ -50,7 +65,7 @@ class InboxHttpError extends Error {
 export interface InboxClientOptions {
   readConfig?: () => InboxConfig;
   dataDir?: string;
-  collect?: (url: string) => Promise<IngestResult>;
+  collect?: (url: string, attempt?: InboxAttempt) => Promise<IngestResult>;
   fetch?: typeof fetch;
   now?: () => number;
   timeoutMs?: number;
@@ -63,9 +78,9 @@ export function createInboxClient(options: InboxClientOptions = {}) {
   const fetchImpl = options.fetch ?? fetch;
   const now = options.now ?? Date.now;
   const receiptsPath = path.join(options.dataDir ?? DATA_DIR, "inbox-receipts.json");
-  const collect = options.collect ?? (async (url: string) => {
+  const collect = options.collect ?? (async (url: string, attempt?: InboxAttempt) => {
     const { runCollection } = await import("./tasks.js");
-    return runCollection(url, "inbox");
+    return runCollection(url, "inbox", attempt);
   });
   let draining = false;
   let lastCheckedAt: string | null = null;
@@ -86,7 +101,10 @@ export function createInboxClient(options: InboxClientOptions = {}) {
       if (saved.version !== 1 || !Array.isArray(saved.pending) || saved.pending.some((r: AckReceipt) =>
         !r || typeof r.id !== "string" || typeof r.endpoint !== "string" || typeof r.receiptId !== "string" ||
         typeof r.ok !== "boolean" || !Number.isFinite(r.nextAttemptAt) || !Number.isFinite(r.attempts))) throw new Error("invalid receipt data");
-      return receipts = saved.pending;
+      // Receipts created by older versions have no title. Keep them replayable without re-analysis.
+      return receipts = saved.pending.map((receipt: AckReceipt) => ({ ...receipt,
+        title: receipt.ok ? receiptTitle(receipt.title) : undefined,
+        failureReport: receipt.ok ? undefined : safeReport(receipt.failureReport) }));
     } catch {
       throw new Error("手机收件箱回执文件损坏，请先恢复 inbox-receipts.json 备份，已暂停拉取以避免重复分析");
     }
@@ -116,6 +134,11 @@ export function createInboxClient(options: InboxClientOptions = {}) {
       if (secret) message = message.replaceAll(secret, "[已隐藏]");
     }
     return message.slice(0, 500);
+  }
+
+  function safeReport(value: unknown, extraSecrets: string[] = []): FailureReport | undefined {
+    const cfg = readConfig();
+    return sanitizeFailureReport(value, [cfg.apiKey || "", cfg.inboxToken, ...extraSecrets]);
   }
 
   async function request(route: string, body?: unknown, target = endpoint(readConfig())) {
@@ -154,7 +177,9 @@ export function createInboxClient(options: InboxClientOptions = {}) {
 
   async function sendReceipt(receipt: AckReceipt, target: Connection): Promise<void> {
     try {
-      await request("/ack", { id: receipt.id, ok: receipt.ok,
+      await request("/ack", { id: receipt.id, ok: receipt.ok, generation: receipt.generation,
+        title: receipt.ok ? receiptTitle(receipt.title) : undefined,
+        failureReport: receipt.ok ? undefined : safeReport(receipt.failureReport, [target.token]),
         error: receipt.error === undefined ? undefined : errorMessage(receipt.error, [target.token]), receiptId: receipt.receiptId }, target);
     } catch (error) {
       // v1 inbox responds 404 when an earlier successful ACK already removed the pending item.
@@ -183,14 +208,22 @@ export function createInboxClient(options: InboxClientOptions = {}) {
         if (loadReceipts().some((r) => r.endpoint === target.base && r.id === item.id)) continue;
         let receipt: AckReceipt;
         try {
-          const collected = await collect(item.url);
+          const maxAttempts = Math.min(3, Math.max(1, Number.isSafeInteger(item.maxAttempts) ? item.maxAttempts! : 3));
+          const completed = Number.isSafeInteger(item.attempts) && item.attempts! >= 0 ? item.attempts! : 0;
+          // A stale/older server must not make this client process a fourth attempt.
+          if (completed >= maxAttempts) continue;
+          const generation = typeof item.generation === "string" && /^(?:legacy|[a-f0-9-]{36})$/i.test(item.generation) ? item.generation : undefined;
+          const collected = await collect(item.url, { id: item.id, attempt: completed + 1, maxAttempts, generation });
           result.ok++;
           result.titles.push(collected.title);
           result.cards += Object.values(collected.counts || {}).reduce((sum, count) => sum + count, 0);
-          receipt = { endpoint: target.base, id: item.id, ok: true, receiptId: crypto.randomUUID(), createdAt: new Date(now()).toISOString(), attempts: 0, nextAttemptAt: 0 };
+          receipt = { endpoint: target.base, id: item.id, generation, ok: true, title: receiptTitle(collected.title), receiptId: crypto.randomUUID(), createdAt: new Date(now()).toISOString(), attempts: 0, nextAttemptAt: 0 };
         } catch (error) {
           result.fail++;
-          receipt = { endpoint: target.base, id: item.id, ok: false, error: errorMessage(error, [target.token, cfg.apiKey || ""]), receiptId: crypto.randomUUID(), createdAt: new Date(now()).toISOString(), attempts: 0, nextAttemptAt: 0 };
+          receipt = { endpoint: target.base, id: item.id, ok: false, error: errorMessage(error, [target.token, cfg.apiKey || ""]),
+            generation: typeof item.generation === "string" && /^(?:legacy|[a-f0-9-]{36})$/i.test(item.generation) ? item.generation : undefined,
+            failureReport: safeReport(failureReportFromError(error), [target.token, cfg.apiKey || ""]),
+            receiptId: crypto.randomUUID(), createdAt: new Date(now()).toISOString(), attempts: 0, nextAttemptAt: 0 };
         }
         // Persist the outcome BEFORE acknowledgement. ACK failures never enter the analysis-failure branch.
         saveReceipts([...loadReceipts(), receipt]);
@@ -218,7 +251,7 @@ export function createInboxClient(options: InboxClientOptions = {}) {
     try {
       const data = await request("/failed");
       const items = ((data.items ?? []) as InboxFailure[]).map((item) => ({ ...item,
-        error: item.error === undefined ? undefined : errorMessage(item.error) }));
+        error: item.error === undefined ? undefined : errorMessage(item.error), failureReport: safeReport(item.failureReport) }));
       return { items, supported: true };
     } catch (error) {
       if (error instanceof InboxHttpError && error.status === 404) {
