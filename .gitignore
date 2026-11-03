@@ -8,8 +8,6 @@ docs/research/
 .env
 .zcode/
 STATE.md
-AGENTS.md
-CLAUDE.md
 *.log
 .DS_Store
 Thumbs.db

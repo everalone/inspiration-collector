@@ -76,7 +76,8 @@ test("structured failures cross the task, receipt and real inbox boundary and st
     }
     assert.equal(processed, 3);
     assert.deepEqual(metadata.map(value => [value.id, value.attempt, value.maxAttempts]), [1, 2, 3].map(attempt => [queued.id, attempt, 3]));
-    const tasks = queue.list();
+    assert.equal(queue.list().length, 1, "three failed attempts appear as one unresolved article");
+    const tasks = queue.list({ includeArchived: true });
     assert.equal(tasks.length, 3);
     assert.ok(tasks.every(task => task.status === "failed" && task.failureReport?.issues[0].field === "payload.url"));
     assert.deepEqual(JSON.parse(await fs.readFile(filePath, "utf8")).map((task: any) => task.inbox.attempt), [1, 2, 3]);

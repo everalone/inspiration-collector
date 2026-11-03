@@ -6,6 +6,7 @@ import type { Config } from "./config.js";
 import type { IngestResult } from "./ingest.js";
 import { failureReportFromError, sanitizeFailureReport, type FailureReport } from "./failure-report.js";
 import type { InboxAttempt } from "./tasks.js";
+import { isUpdatePending, assertCollectionAvailable } from "./maintenance.js";
 
 export interface InboxItem {
   id: string;
@@ -196,7 +197,7 @@ export function createInboxClient(options: InboxClientOptions = {}) {
   async function drain(): Promise<DrainResult> {
     const result: DrainResult = { ok: 0, fail: 0, titles: [], cards: 0 };
     const cfg = readConfig();
-    if (!cfg.inboxEnabled || !cfg.inboxUrl || !cfg.inboxToken || draining) return result;
+    if (!cfg.inboxEnabled || !cfg.inboxUrl || !cfg.inboxToken || draining || isUpdatePending()) return result;
     draining = true;
     try {
       const target = endpoint(cfg);
@@ -205,6 +206,7 @@ export function createInboxClient(options: InboxClientOptions = {}) {
       }
       const items = (await request("/pull?limit=5", undefined, target)).items ?? [];
       for (const item of items) {
+        if (isUpdatePending()) break;
         if (loadReceipts().some((r) => r.endpoint === target.base && r.id === item.id)) continue;
         let receipt: AckReceipt;
         try {
@@ -264,6 +266,7 @@ export function createInboxClient(options: InboxClientOptions = {}) {
   }
 
   async function retry(id: string): Promise<{ ok: true }> {
+    assertCollectionAvailable();
     if (!id) throw new Error("请选择要重试的收件箱任务");
     const target = endpoint(readConfig());
     for (const receipt of loadReceipts().filter((r) => r.endpoint === target.base && r.id === id)) await sendReceipt(receipt, target);
@@ -272,13 +275,14 @@ export function createInboxClient(options: InboxClientOptions = {}) {
     return { ok: true };
   }
 
-  return { drain, ack, status, failures, retry };
+  return { drain, ack, status, failures, retry, isBusy: () => draining };
 }
 
 const client = createInboxClient();
 export const drainInboxOnce = client.drain;
 export const inboxAck = client.ack;
 export const getInboxStatus = client.status;
+export const isInboxBusy = client.isBusy;
 export const listInboxFailures = client.failures;
 export const retryInboxItem = client.retry;
 

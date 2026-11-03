@@ -5,12 +5,130 @@ import os from 'node:os';
 import path from 'node:path';
 import { createTaskQueue, normalizeArticleUrl } from '../core/tasks.js';
 import { CollectionFailure, sanitizeFailureReport, type FailureReport } from '../core/failure-report.js';
+import { setUpdatePending } from '../core/maintenance.js';
 
 function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inspiration-tasks-'));
   return { dir, filePath: path.join(dir, 'tasks.json') };
 }
 const result = (title: string) => ({ articleId: title, title, account: '', articleType: 'note', summary: '', tags: [], counts: { note: 1 }, unsureCount: 0, items: [] });
+
+test('two failed inbox attempts are archived after the third succeeds without losing replay outcomes', async () => {
+  const { filePath } = fixture(); let calls = 0;
+  const process = async () => { if (++calls < 3) throw new Error(`failure ${calls}`); return result('recovered article'); };
+  const queue = createTaskQueue({ filePath, process });
+  const url = 'https://mp.weixin.qq.com/s/recovered-history';
+  const context = { id: 'remote', generation: 'round-one', maxAttempts: 3 };
+  const first = queue.enqueue(url, 'inbox', false, { ...context, attempt: 1 });
+  await assert.rejects(queue.wait(first.id), /failure 1/);
+  const second = queue.enqueue(url, 'inbox', false, { ...context, attempt: 2 });
+  await assert.rejects(queue.wait(second.id), /failure 2/);
+  const third = queue.enqueue(url, 'inbox', false, { ...context, attempt: 3 });
+  await queue.wait(third.id);
+  assert.deepEqual(queue.list().map(t => t.id), [third.id]);
+  const stored = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  assert.equal(stored.find((t: any) => t.id === first.id).resolvedBy, third.id);
+  const restarted = createTaskQueue({ filePath, process });
+  assert.deepEqual(restarted.list().map(t => t.id), [third.id]);
+  const replayed = restarted.enqueue(url, 'inbox', false, { ...context, attempt: 1 });
+  assert.equal(replayed.id, first.id);
+  await assert.rejects(restarted.wait(replayed.id), /failure 1/);
+  assert.equal(calls, 3);
+});
+
+test('legacy same-millisecond success repairs old failure history but keeps a later failed refresh', () => {
+  const { filePath } = fixture(); const now = '2026-11-01T10:00:00.000Z';
+  const base = { url: 'https://mp.weixin.qq.com/s/legacy-history', source: 'inbox', attempts: 1, createdAt: now, updatedAt: now, refresh: false };
+  fs.writeFileSync(filePath, JSON.stringify([
+    { ...base, id: 'failure-one', status: 'failed', error: 'first' },
+    { ...base, id: 'failure-two', status: 'failed', error: 'second' },
+    { ...base, id: 'success', status: 'done', result: result('success') },
+    { ...base, id: 'failed-refresh', source: 'reprocess', refresh: true, status: 'failed', error: 'refresh failed' },
+    { ...base, id: 'duplicate', status: 'done', result: { ...result('already saved'), skipped: true } },
+  ]));
+  const queue = createTaskQueue({ filePath, process: async () => { throw new Error('must not run'); } });
+  assert.deepEqual(queue.list().filter(t => t.status === 'failed').map(t => t.id), ['failed-refresh']);
+  assert.equal(JSON.parse(fs.readFileSync(filePath, 'utf8')).find((t: any) => t.id === 'failure-one').resolvedBy, 'success');
+});
+
+test('a successful retry of an older task id resolves newer-created failures without rewriting their replay result', async () => {
+  const { filePath } = fixture(); const now = '2026-11-01T10:00:00.000Z';
+  const base = { url: 'https://mp.weixin.qq.com/s/reused-id', source: 'manual', attempts: 1, createdAt: now, updatedAt: now, refresh: false, status: 'failed' };
+  fs.writeFileSync(filePath, JSON.stringify([
+    { ...base, id: 'older-id', error: 'old failure' },
+    { ...base, id: 'newer-id', source: 'inbox', error: 'later failure', inbox: { id: 'remote', generation: 'same-round', attempt: 2, maxAttempts: 3 } },
+  ]));
+  const queue = createTaskQueue({ filePath, process: async () => result('recovered') });
+  queue.retry('older-id'); await queue.wait('older-id');
+  assert.deepEqual(queue.list().map(t => t.id), ['older-id']);
+  await assert.rejects(queue.wait('newer-id'), /later failure/);
+  assert.throws(() => queue.retry('newer-id'), /后续成功处理/);
+});
+
+test('archived inbox failures remain archived when completed history rolls over', async () => {
+  const { filePath } = fixture(); const now = '2026-11-01T10:00:00.000Z';
+  const base = { source: 'inbox', attempts: 1, createdAt: now, updatedAt: now, refresh: false };
+  fs.writeFileSync(filePath, JSON.stringify([
+    { ...base, id: 'old-failure', url: 'https://mp.weixin.qq.com/s/old', status: 'failed', error: 'old error', inbox: { id: 'remote', generation: 'old-round', attempt: 1, maxAttempts: 3 } },
+    { ...base, source: 'manual', id: 'old-success', url: 'https://mp.weixin.qq.com/s/old', status: 'done', result: result('old success') },
+    ...Array.from({ length: 205 }, (_, i) => ({ ...base, source: 'manual', id: `done-${i}`, url: `https://mp.weixin.qq.com/s/done-${i}`, status: 'done', result: result(`done-${i}`) })),
+  ]));
+  const queue = createTaskQueue({ filePath, process: async () => result('new') });
+  const added = queue.enqueue('https://mp.weixin.qq.com/s/new'); await queue.wait(added.id);
+  const restarted = createTaskQueue({ filePath, process: async () => { throw new Error('must not run'); } });
+  assert.equal(restarted.list().some(t => t.id === 'old-failure'), false);
+  assert.equal(restarted.list().filter(t => t.status === 'done').length, 10);
+  assert.equal(restarted.list({ includeArchived: true }).filter(t => t.status === 'done').length, 200);
+  await assert.rejects(restarted.wait('old-failure'), /old error/);
+});
+
+test('clearing completed history persists through restart and leaves active work and unresolved failures intact', async () => {
+  const { filePath } = fixture(); const now = '2026-11-01T10:00:00.000Z';
+  const base = { source: 'manual', attempts: 1, createdAt: now, updatedAt: now, refresh: false };
+  const context = { id: 'remote', generation: 'archive-round', attempt: 1, maxAttempts: 3 };
+  fs.writeFileSync(filePath, JSON.stringify([
+    ...Array.from({ length: 12 }, (_, i) => ({ ...base, id: `done-${i}`, url: `https://mp.weixin.qq.com/s/archive-${i}`, status: 'done', result: result(`done-${i}`),
+      ...(i === 11 ? { source: 'inbox', inbox: context } : {}) })),
+    { ...base, id: 'still-failed', url: 'https://mp.weixin.qq.com/s/still-failed', status: 'failed', error: 'not solved' },
+    { ...base, id: 'still-queued', url: 'https://mp.weixin.qq.com/s/still-queued', status: 'queued' },
+  ]));
+  let calls = 0;
+  const process = async () => { calls++; return result('unexpected'); };
+  const queue = createTaskQueue({ filePath, process });
+  assert.equal(queue.list().filter(t => t.status === 'done').length, 10);
+  assert.equal(queue.archiveCompleted().archived, 12);
+  assert.deepEqual(queue.list().map(t => t.id), ['still-queued', 'still-failed']);
+  const restarted = createTaskQueue({ filePath, process });
+  assert.deepEqual(restarted.list().map(t => t.id), ['still-queued', 'still-failed']);
+  assert.equal(restarted.archiveCompleted().archived, 0);
+  const replay = restarted.enqueue('https://mp.weixin.qq.com/s/archive-11', 'inbox', false, context);
+  assert.equal(replay.id, 'done-11');
+  assert.equal((await restarted.wait(replay.id)).title, 'done-11');
+  assert.equal(calls, 0);
+});
+
+test('failed archive persistence leaves completed records visible', async t => {
+  const { filePath } = fixture();
+  const queue = createTaskQueue({ filePath, process: async () => result('kept') });
+  const task = queue.enqueue('https://mp.weixin.qq.com/s/archive-save-error'); await queue.wait(task.id);
+  t.mock.method(fs, 'renameSync', () => { throw new Error('disk full'); });
+  assert.throws(() => queue.archiveCompleted(), /disk full/);
+  assert.equal(queue.list()[0].id, task.id);
+  assert.equal(queue.list()[0].archivedAt, undefined);
+});
+
+test('updater maintenance gate refuses enqueue and retry before changing task state', async () => {
+  const { filePath } = fixture();
+  const queue = createTaskQueue({ filePath, process: async () => { throw new Error('model failed'); } });
+  const task = queue.enqueue('https://mp.weixin.qq.com/s/update-lock'); await assert.rejects(queue.wait(task.id));
+  setUpdatePending(true);
+  try {
+    assert.throws(() => queue.enqueue('https://mp.weixin.qq.com/s/blocked-new'), /正在准备更新/);
+    assert.throws(() => queue.retry(task.id), /正在准备更新/);
+    assert.equal(queue.list().length, 1);
+    assert.equal(queue.list()[0].status, 'failed');
+  } finally { setUpdatePending(false); }
+});
 
 test('same inbox generation and attempt replays a persisted failure after restart without analysis', async () => {
   const { filePath } = fixture(); let calls = 0;

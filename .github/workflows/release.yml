@@ -23,7 +23,7 @@ jobs:
         shell: bash
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PKG_VERSION="$(node -p "require('./package.json').version")"
+          PKG_VERSION="$(node --input-type=module -e "import fs from 'node:fs'; import { toReleaseVersion } from './src-electron/version.mjs'; const p = JSON.parse(fs.readFileSync('package.json', 'utf8')); const version = toReleaseVersion(p.version); if (p.build.buildVersion !== version) throw new Error('build.buildVersion must match the release version'); console.log(version);")"
           echo "tag=$TAG_VERSION package=$PKG_VERSION"
           if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
             echo "::error::tag version ($TAG_VERSION) != package.json version ($PKG_VERSION)"
@@ -46,11 +46,26 @@ jobs:
       - name: Check package privacy boundary
         run: node scripts/check-package.mjs release/win-unpacked/resources/app.asar
 
+      - name: Create application update manifest
+        run: node scripts/create-update-manifest.mjs release
+
       - name: Verify packaged runtime
         shell: pwsh
         run: |
           $env:ELECTRON_RUN_AS_NODE = '1'
-          & './release/win-unpacked/灵感收集.exe' scripts/check-runtime.mjs release/win-unpacked/resources/app.asar
+          try {
+            $check = Start-Process -FilePath (Resolve-Path './release/win-unpacked/灵感收集.exe') -ArgumentList @('scripts/check-runtime.mjs', 'release/win-unpacked/resources/app.asar') -WorkingDirectory $PWD -WindowStyle Hidden -Wait -PassThru
+          } finally {
+            Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+          }
+          exit $check.ExitCode
+
+      - name: Verify repeated Portable launch and lazy image loading
+        shell: pwsh
+        run: |
+          $version = node --input-type=module -e "import fs from 'node:fs'; import { toReleaseVersion } from './src-electron/version.mjs'; console.log(toReleaseVersion(JSON.parse(fs.readFileSync('package.json', 'utf8')).version));"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check-portable.mjs "release/InspirationCollector-Portable-$version.exe" --output release/portable-regression
           exit $LASTEXITCODE
 
       - name: Create GitHub Release
@@ -60,4 +75,6 @@ jobs:
             release/InspirationCollector-Setup-*.exe
             release/InspirationCollector-Portable-*.exe
             release/latest.yml
+            release/update.json
+          fail_on_unmatched_files: true
           body_path: docs/releases/${{ github.ref_name }}.md

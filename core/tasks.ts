@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { DATA_DIR, loadConfig } from "./config.js";
 import type { IngestResult } from "./ingest.js";
 import { CollectionFailure, failureReportFromError, sanitizeFailureReport, type FailureReport } from "./failure-report.js";
+import { assertCollectionAvailable } from "./maintenance.js";
 
 export interface InboxAttempt { id: string; attempt: number; maxAttempts: number; generation?: string }
 
@@ -21,6 +22,11 @@ export interface CollectionTask {
   failureReport?: FailureReport;
   inbox?: InboxAttempt;
   result?: IngestResult;
+  /** Display history only: original status/result stays replayable for inbox ACK recovery. */
+  resolvedAt?: string;
+  resolvedBy?: string;
+  archivedAt?: string;
+  completedOrder?: number;
 }
 
 export function normalizeArticleUrl(value: string): string {
@@ -59,6 +65,7 @@ export function createTaskQueue(options: {
 }) {
   let tasks: CollectionTask[] = [];
   let running = false;
+  let completedOrder = 0;
   const waiters = new Map<string, { resolve: (r: IngestResult) => void; reject: (e: Error) => void }[]>();
   if (fs.existsSync(options.filePath)) {
     const stored: unknown = JSON.parse(fs.readFileSync(options.filePath, "utf8"));
@@ -73,13 +80,43 @@ export function createTaskQueue(options: {
       if (task.refresh) task.error = "上次重跑被中断，请查看已有卡片后决定是否重试";
     }
   }
+  const ordered = () => tasks.map((task, index) => ({ task, index })).sort((a, b) =>
+    (Date.parse(a.task.updatedAt) || 0) - (Date.parse(b.task.updatedAt) || 0) ||
+    (a.task.completedOrder ?? a.index) - (b.task.completedOrder ?? b.index));
+  completedOrder = Math.max(tasks.length, ...tasks.map(t => t.completedOrder || 0));
+  const canResolve = (failure: CollectionTask, success: CollectionTask) => failure.url === success.url &&
+    (!failure.refresh || (success.refresh && !success.result?.skipped));
+  const resolveFailures = (success: CollectionTask, candidates: CollectionTask[]) => {
+    let changed = false;
+    for (const failure of candidates) if (failure.status === "failed" && !failure.resolvedBy && canResolve(failure, success)) {
+      failure.resolvedBy = success.id;
+      failure.resolvedAt = success.updatedAt;
+      changed = true;
+    }
+    return changed;
+  };
+  // Repair old task files before pruning the successful record that proves recovery.
+  // File order breaks equal-timestamp ties for legacy attempts; current successes mark
+  // earlier outcomes directly, including retries that reuse an older task ID.
+  let migrated = false;
+  const earlier: CollectionTask[] = [];
+  for (const { task } of ordered()) {
+    if (task.status === "done") migrated = resolveFailures(task, earlier) || migrated;
+    earlier.push(task);
+  }
   const persist = () => {
     fs.mkdirSync(path.dirname(options.filePath), { recursive: true });
-    const recentDone = new Set(tasks.filter(t => t.status === "done").slice(-200).map(t => t.id));
-    tasks = tasks.filter(t => t.status !== "done" || recentDone.has(t.id));
-    fs.writeFileSync(`${options.filePath}.tmp`, JSON.stringify(tasks), { encoding: "utf8", mode: 0o600 });
+    const recentDone = new Set(ordered().filter(({ task }) => task.status === "done").slice(-200).map(({ task }) => task.id));
+    const recentResolved = new Set(ordered().filter(({ task }) => task.resolvedBy).slice(-200).map(({ task }) => task.id));
+    // Retain identified inbox outcomes even after display history is cleared: replaying
+    // a lost ACK must not turn a hidden record into a second paid analysis.
+    const next = tasks.filter(t => (t.source === "inbox" && t.inbox?.generation) ||
+      (t.status === "done" ? recentDone.has(t.id) : !t.resolvedBy || recentResolved.has(t.id)));
+    fs.writeFileSync(`${options.filePath}.tmp`, JSON.stringify(next), { encoding: "utf8", mode: 0o600 });
     fs.renameSync(`${options.filePath}.tmp`, options.filePath);
+    tasks = next;
   };
+  if (migrated) persist();
   const sanitize = options.sanitizeError ?? ((e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 500));
   const sanitizeReport = options.sanitizeReport ?? sanitizeFailureReport;
   const taskError = (task: CollectionTask): Error => task.failureReport ? new CollectionFailure(task.failureReport) : new Error(task.error);
@@ -106,6 +143,8 @@ export function createTaskQueue(options: {
           if (task.failureReport?.articleTitle) task.title = task.failureReport.articleTitle;
         }
         task.updatedAt = new Date().toISOString();
+        task.completedOrder = ++completedOrder;
+        if (task.status === "done") resolveFailures(task, tasks);
         persist();
         for (const waiter of waiters.get(task.id) ?? []) {
           if (task.status === "done") waiter.resolve(task.result!);
@@ -136,6 +175,7 @@ export function createTaskQueue(options: {
   }
   const start = () => queueMicrotask(() => void pump());
   const enqueue = (input: string, source = "manual", refresh = false, inbox?: InboxAttempt) => {
+    assertCollectionAvailable();
     const url = normalizeArticleUrl(input);
     // A durable outcome can outlive the process before its ACK receipt is saved.
     // Replay that outcome for the same server attempt rather than paying again.
@@ -166,9 +206,11 @@ export function createTaskQueue(options: {
     });
   };
   const retry = (id: string) => {
+    assertCollectionAvailable();
     const task = tasks.find(t => t.id === id);
     if (!task) throw new Error("任务不存在");
     if (task.status !== "failed") return { ...task };
+    if (task.resolvedBy) throw new Error("该失败任务已由后续成功处理，无需重试");
     const active = tasks.find(t => t.id !== id && t.url === task.url && t.refresh === task.refresh && ["queued", "running"].includes(t.status));
     if (active) return { ...active };
     const previous = { ...task };
@@ -176,11 +218,35 @@ export function createTaskQueue(options: {
     task.updatedAt = new Date().toISOString();
     delete task.error;
     delete task.failureReport;
+    delete task.completedOrder;
     try { persist(); } catch (e) { Object.assign(task, previous); throw e; }
     start();
     return { ...task };
   };
-  return { enqueue, wait, retry, start, list: () => tasks.slice().reverse().map(t => ({ ...t })) };
+  const list = (view: { includeArchived?: boolean } = {}) => {
+    const recent = ordered().reverse().map(({ task }) => task);
+    if (view.includeArchived) return recent.map(t => ({ ...t }));
+    let completed = 0;
+    const pending = new Set<string>();
+    return recent.filter(task => {
+      if (task.archivedAt || task.resolvedBy) return false;
+      if (task.status === "done") return ++completed <= 10;
+      const key = `${task.url}\0${!!task.refresh}`;
+      if (task.status === "failed" && pending.has(key)) return false;
+      pending.add(key);
+      return true;
+    }).map(t => ({ ...t }));
+  };
+  const archiveCompleted = () => {
+    const candidates = tasks.filter(task => !task.archivedAt && (task.status === "done" || task.resolvedBy));
+    if (!candidates.length) return { archived: 0 };
+    const now = new Date().toISOString();
+    for (const task of candidates) task.archivedAt = now;
+    try { persist(); }
+    catch (error) { for (const task of candidates) delete task.archivedAt; throw error; }
+    return { archived: candidates.length };
+  };
+  return { enqueue, wait, retry, start, list, archiveCompleted };
 }
 
 let sharedQueue: ReturnType<typeof createTaskQueue> | undefined;

@@ -36,6 +36,58 @@ test('HTTP pagination includes all 603 stored cards without duplication', async 
   assert.equal(ids.size, 603);
 });
 
+test('article summaries expose complete type counts independently from child filtering', async () => {
+  store.upsertArticle({ id: 'v024-types', url: 'https://mp.weixin.qq.com/s/v024-types', title: 'Mixed categories', account: 'Fixture author', publishDate: '', description: '', summary: 'Summary for parent view', imagesDir: 'private-image-directory', processed: true });
+  store.replaceItems('v024-types', [
+    { type: 'note', title: 'Note', payload: { sections: [{ heading: 'Test', bullets: ['Content'] }] } },
+    { type: 'palette', title: 'Color', payload: { colors: [{ hex: '#6FAEE0', name: 'Blue' }] } },
+    { type: 'note', title: 'Another note', payload: { sections: [{ heading: 'Test', bullets: ['Second'] }] } },
+  ], new Map());
+  store.upsertArticle({ id: 'v024-empty', url: 'https://mp.weixin.qq.com/s/v024-empty', title: 'Article without cards', account: 'Fixture author', publishDate: '', description: '' });
+  try {
+    const bootstrap = await (await fetch(`${base}/api/bootstrap`)).json() as any;
+    const summary = bootstrap.articles.find((a: any) => a.id === 'v024-types');
+    assert.equal(summary.title, 'Mixed categories');
+    assert.equal(summary.account, 'Fixture author');
+    assert.equal(summary.itemCount, 3);
+    assert.deepEqual(summary.typeCounts, { palette: 1, website: 0, repo: 0, prompt: 0, note: 2 });
+    assert.ok(summary.processed_at && summary.fetched_at);
+    assert.equal(Object.hasOwn(summary, 'images_dir'), false);
+    const empty = bootstrap.articles.find((a: any) => a.id === 'v024-empty');
+    assert.equal(empty.itemCount, 0);
+    assert.deepEqual(empty.typeCounts, { palette: 0, website: 0, repo: 0, prompt: 0, note: 0 });
+    const fullArticles = await (await fetch(`${base}/api/articles`)).json() as any[];
+    assert.equal(fullArticles.find(a => a.id === 'v024-types').images_dir, 'private-image-directory');
+  } finally {
+    store.deleteArticle('v024-types');
+    store.deleteArticle('v024-empty');
+  }
+});
+
+test('article-scoped item query applies category, search, total and pagination to one article', async () => {
+  store.upsertArticle({ id: 'v024-scoped', url: 'https://mp.weixin.qq.com/s/v024-scoped', title: 'Scoped article', account: 'Fixture author', publishDate: '', description: '' });
+  store.replaceItems('v024-scoped', [
+    { type: 'note', title: 'Needle one', payload: { sections: [{ heading: 'Test', bullets: ['Content'] }] } },
+    { type: 'note', title: 'Needle two', payload: { sections: [{ heading: 'Test', bullets: ['Content'] }] } },
+    { type: 'palette', title: 'Needle color', payload: { colors: [{ hex: '#8CC9EC' }] } },
+  ], new Map());
+  try {
+    const first = await (await fetch(`${base}/api/items?articleId=v024-scoped&type=note&q=Needle&limit=1&offset=0`)).json() as any;
+    const second = await (await fetch(`${base}/api/items?articleId=v024-scoped&type=note&q=Needle&limit=1&offset=1`)).json() as any;
+    assert.equal(first.total, 2);
+    assert.equal(second.total, 2);
+    assert.equal(first.items.length, 1);
+    assert.equal(second.items.length, 1);
+    assert.notEqual(first.items[0].id, second.items[0].id);
+    for (const item of [...first.items, ...second.items]) {
+      assert.equal(item.article_id, 'v024-scoped');
+      assert.equal(item.type, 'note');
+    }
+    const absent = await (await fetch(`${base}/api/items?articleId=unknown&type=note`)).json() as any;
+    assert.deepEqual(absent, { items: [], total: 0 });
+  } finally { store.deleteArticle('v024-scoped'); }
+});
+
 test('queue submission for an existing article finishes without API analysis or card replacement', async () => {
   const response = await post('/api/tasks', { url: 'https://mp.weixin.qq.com/s/existing' });
   assert.equal(response.status, 202);
@@ -44,6 +96,20 @@ test('queue submission for an existing article finishes without API analysis or 
   const result = await getTaskQueue().wait(task.id);
   assert.equal(result.skipped, true);
   assert.equal(store.countItems(), 603);
+});
+
+test('archive endpoint clears only completed history and never deletes collected articles or cards', async () => {
+  const created = await post('/api/tasks', { url: 'https://mp.weixin.qq.com/s/existing' });
+  const { task } = await created.json() as any;
+  const { getTaskQueue } = await import('../core/tasks.js');
+  await getTaskQueue().wait(task.id);
+  const response = await post('/api/tasks/archive', { ids: ['arbitrary-untrusted-id'] });
+  assert.equal(response.status, 200);
+  assert.ok(((await response.json()) as any).archived >= 1);
+  const snapshot = await (await fetch(`${base}/api/tasks`)).json() as any;
+  assert.equal(snapshot.tasks.some((row: any) => row.id === task.id), false);
+  assert.equal(store.countItems(), 603);
+  assert.equal((await getTaskQueue().wait(task.id)).skipped, true);
 });
 
 test('invalid collection URLs, cross-site mutations and rebinding hosts are rejected', async () => {

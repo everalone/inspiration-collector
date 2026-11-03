@@ -96,11 +96,14 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
         typeCounts: typeCounts(),
         unsureCount: countItems({ verify: "unsure" }),
         articleCount: articles.length,
+        articles: articles.map(({ id, url, title, account, summary, processed_at, fetched_at, itemCount, typeCounts }) =>
+          ({ id, url, title, account, summary, processed_at, fetched_at, itemCount, typeCounts })),
       });
     }
     if (p === "/api/items") {
       const q = url.searchParams;
       const filter = {
+        articleId: q.get("articleId") ?? undefined,
         type: q.get("type") ?? undefined, tag: q.get("tag") ?? undefined,
         q: q.get("q") ?? undefined, verify: q.get("verify") ?? undefined,
         limit: Math.min(500, Math.max(1, Number.parseInt(q.get("limit") || "200", 10) || 200)),
@@ -167,9 +170,13 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       return sendJson(res, 202, { task });
     } catch (e) { return sendJson(res, 400, { error: redactTaskError(e) }); }
   }
+  if (req.method === "POST" && p === "/api/tasks/archive") {
+    try { return sendJson(res, 200, getTaskQueue().archiveCompleted()); }
+    catch (e) { return sendJson(res, 500, { error: redactTaskError(e) }); }
+  }
   const taskRetry = p.match(/^\/api\/tasks\/([\w-]+)\/retry$/);
   if (req.method === "POST" && taskRetry) {
-    const task = getTaskQueue().list().find(t => t.id === taskRetry[1]);
+    const task = getTaskQueue().list({ includeArchived: true }).find(t => t.id === taskRetry[1]);
     if (task?.source === "inbox") return sendJson(res, 400, { error: "请从手机收件箱失败列表重新排队" });
     try { return sendJson(res, 200, { task: getTaskQueue().retry(taskRetry[1]) }); }
     catch (e) { return sendJson(res, 400, { error: redactTaskError(e) }); }

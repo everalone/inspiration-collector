@@ -8,23 +8,50 @@
 </head>
 <body>
 <header>
-  <div class="brand-row">
-    <h1>灵感收集</h1>
-    <button class="mini-btn" id="settings-btn">⚙ 设置</button>
-    <button class="mini-btn" id="tasks-btn" aria-live="polite">任务</button>
+  <div class="titlebar" id="window-titlebar">
+    <div class="brand-row">
+      <h1><span class="brand-mark" aria-hidden="true">✦</span>灵感收集</h1>
+      <button class="mini-btn" id="settings-btn" type="button">⚙ 设置</button>
+      <button class="mini-btn" id="tasks-btn" type="button" aria-live="polite">任务</button>
+      <span class="stat">本地灵感库</span>
+    </div>
+    <div class="titlebar-spacer" aria-hidden="true"></div>
+    <div class="desktop-controls" id="desktop-controls" hidden>
+      <button class="update-button" id="update-btn" type="button" aria-controls="update-panel" aria-expanded="false" title="检查应用更新">
+        <svg class="update-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M15.8 7A6 6 0 0 0 5 5L3 7m0-4v4h4M4.2 13A6 6 0 0 0 15 15l2-2m0 4v-4h-4"/></svg>
+        <span id="update-label">检查更新</span>
+      </button>
+      <button class="window-button" id="window-minimize" type="button" aria-label="最小化" title="最小化"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10"/></svg></button>
+      <button class="window-button" id="window-maximize" type="button" aria-label="最大化" title="最大化"><svg viewBox="0 0 16 16" aria-hidden="true"><path class="maximize-symbol" d="M3.5 3.5h9v9h-9z"/><path class="restore-symbol" d="M5.5 3.5h7v7M3.5 5.5h7v7h-7z"/></svg></button>
+      <button class="window-button window-close" id="window-close" type="button" aria-label="关闭到托盘" title="关闭到托盘，后台收集继续"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8"/></svg></button>
+    </div>
   </div>
+  <div class="collection-toolbar">
   <div class="ingest-bar">
     <input id="ingest-input" type="text" placeholder="粘贴微信公众号文章链接，加入后台收集队列…">
     <button id="ingest-btn">收集</button>
   </div>
   <input id="search" type="search" placeholder="搜索标题 / 内容 / 公众号…">
-  <nav id="tabs"></nav>
+  <nav id="tabs" aria-label="灵感分类"></nav>
+  </div>
+  <div id="reading-progress" class="reading-progress-track" role="progressbar" aria-label="文章阅读进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+    <span id="reading-progress-fill"></span>
+  </div>
 </header>
 
+<section class="update-panel" id="update-panel" role="dialog" aria-labelledby="update-title" hidden>
+  <div class="update-panel-heading"><h2 id="update-title">应用更新</h2><button id="update-dismiss" class="update-dismiss" type="button" aria-label="收起更新信息">×</button></div>
+  <p class="update-version" id="update-version"></p>
+  <p class="update-description" id="update-description" role="status" aria-live="polite">正在读取更新状态…</p>
+  <progress id="update-progress" max="100" value="0" aria-label="更新下载进度" hidden></progress>
+  <p class="update-error" id="update-error" role="alert" hidden></p>
+  <button id="update-action" class="update-action" type="button">检查更新</button>
+</section>
+
 <main class="layout">
-  <aside id="list"></aside>
+  <aside id="list" aria-label="文章与灵感卡片"></aside>
   <div id="splitter" title="拖动调整宽度"></div>
-  <section id="detail"><div class="empty">选择左侧卡片查看详情</div></section>
+  <section id="detail" aria-label="阅读详情"><div class="empty">选择一篇文章，展开你的灵感</div></section>
 </main>
 
 <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
@@ -33,6 +60,7 @@
 </div>
 <div id="modal" class="modal-mask hidden"></div>
 
+<script src="desktop.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

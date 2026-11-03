@@ -1,24 +1,35 @@
-import { app, BrowserWindow, Tray, Menu, clipboard, Notification, nativeImage } from "electron";
+import { app, BrowserWindow, Tray, Menu, clipboard, Notification, nativeImage, ipcMain, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClipboardCollector } from "./collection-controller.mjs";
+import { createUpdater } from "./updater.mjs";
+import { registerDesktopIpc } from "./desktop-ipc.mjs";
+import { toReleaseVersion } from "./version.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = Number(process.env.INSPIRATION_PORT) || 5178;
 const BASE = `http://127.0.0.1:${PORT}`;
+const VERSION = toReleaseVersion(app.getVersion());
 
 app.setAppUserModelId("com.p016.inspiration-collector");
 
 const icon = nativeImage.createFromPath(path.join(ROOT, "src-electron", "icon.png"));
 const startHidden = process.argv.includes("--hidden");
+// Isolated package checks exercise real startup without consuming the user's clipboard.
+const runtimeCheck = process.argv.includes("--runtime-check");
 
 let tray = null;
 let win = null;
 let lastCoreError = null;
-let autoCollect = true;
+let autoCollect = !runtimeCheck;
 let clipboardTimer = null;
 let notificationTimer = null;
+let updateTimer = null;
+let updateStartupTimer = null;
+let updater = null;
+let desktopIpc = null;
+let coreRuntime = null;
 const launchedAt = Date.now();
 
 app.isQuiting = false;
@@ -37,6 +48,7 @@ if (!app.requestSingleInstanceLock()) {
 
 function showWindow() {
   if (!win) return;
+  if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
 }
@@ -65,11 +77,42 @@ async function boot() {
       app.quit();
       return;
     }
+    const tasksModule = await import("../dist/core/tasks.js");
+    const inboxModule = await import("../dist/core/inbox-client.js");
+    const maintenance = await import("../dist/core/maintenance.js");
+    coreRuntime = { tasks: tasksModule.getTaskQueue(), inbox: inboxModule, maintenance };
+    updater = createUpdater({
+      currentVersion: VERSION, isPackaged: app.isPackaged, platform: process.platform, arch: process.arch,
+      portableExecutable: process.env.PORTABLE_EXECUTABLE_FILE, exePath: app.getPath("exe"), userDataDir,
+      onChange: state => {
+        if (win && !win.isDestroyed()) win.webContents.send("desktop:update-state-changed", state);
+      },
+      canInstall: () => {
+        // A synchronous idle check + gate keeps later async input from racing the updater.
+        if (coreRuntime.tasks.list().some(task => ["queued", "running"].includes(task.status))) {
+          return "还有收集任务正在处理，请完成后再重启更新";
+        }
+        if (coreRuntime.inbox.isInboxBusy()) return "正在同步手机收件箱，请稍后再点重启更新";
+        if (coreRuntime.inbox.getInboxStatus().pendingAckCount) return "还有收集回执等待确认，请恢复收件箱连接后再更新";
+        coreRuntime.maintenance.setUpdatePending(true);
+        return true;
+      },
+      onBeforeQuit: () => { app.isQuiting = true; app.quit(); },
+    });
+    desktopIpc = registerDesktopIpc({ ipcMain, getWindow: () => win, updater, version: VERSION, baseUrl: BASE,
+      releaseInstallGate: () => coreRuntime.maintenance.setUpdatePending(false) });
     createWindow();
     createTray();
-    watchClipboard();
-    watchTaskNotifications();
-    new Notification({ title: "灵感收集已启动", body: "复制微信文章链接即可自动收集", icon }).show();
+    if (!runtimeCheck) {
+      watchClipboard();
+      watchTaskNotifications();
+    }
+    if (app.isPackaged && !runtimeCheck) {
+      const check = () => void updater.check().catch(() => {});
+      updateStartupTimer = setTimeout(check, 10_000);
+      updateTimer = setInterval(check, 6 * 60 * 60 * 1000);
+    }
+    if (!runtimeCheck) new Notification({ title: "灵感收集已启动", body: "复制微信文章链接即可自动收集", icon }).show();
   } catch (e) {
     dialogError(`启动异常: ${String(e).slice(0, 100)}`);
     app.quit();
@@ -113,12 +156,35 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1440,
     height: 960,
+    minWidth: 980,
+    minHeight: 640,
     show: false,
     title: "灵感收集",
     icon,
     autoHideMenuBar: true,
-    backgroundColor: "#f4f4f5",
+    frame: false,
+    titleBarStyle: "hidden",
+    roundedCorners: true,
+    thickFrame: true,
+    backgroundColor: "#00000000",
+    ...(process.platform === "win32" ? { backgroundMaterial: "acrylic" } : {}),
+    webPreferences: { preload: path.join(ROOT, "src-electron", "preload.cjs"),
+      contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
+  win.setMenu(null);
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    try { if (["https:", "http:"].includes(new URL(url).protocol)) void shell.openExternal(url).catch(() => {}); } catch { /* Invalid link. */ }
+    return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (event, url) => {
+    try { if (new URL(url).origin !== BASE) event.preventDefault(); }
+    catch { event.preventDefault(); }
+  });
+  const publishWindowState = () => {
+    if (!win.isDestroyed()) win.webContents.send("desktop:window-state-changed", desktopIpc.windowState());
+  };
+  win.on("maximize", publishWindowState);
+  win.on("unmaximize", publishWindowState);
   win.loadURL(`${BASE}/`);
   win.once("ready-to-show", () => {
     if (startHidden) win.hide();
@@ -180,6 +246,7 @@ function watchClipboard() {
     onError: () => new Notification({ title: "暂时无法提交收集", body: "链接已暂存，连接恢复后自动重试。", icon }).show(),
   });
   clipboardTimer = setInterval(() => {
+    if (coreRuntime?.maintenance.isUpdatePending()) return;
     try { void collector.accept(clipboard.readText(), autoCollect); } catch { /* clipboard temporarily unavailable */ }
   }, 1500);
 }
@@ -192,11 +259,10 @@ function watchTaskNotifications() {
     if (polling) return;
     polling = true;
     try {
-      const response = await fetch(`${BASE}/api/tasks`, { signal: AbortSignal.timeout(10000) });
-      if (!response.ok) return;
-      const { tasks = [] } = await response.json();
+      // Notifications read the durable queue; the UI intentionally limits completed history to ten rows.
+      const tasks = coreRuntime.tasks.list({ includeArchived: true });
       for (const task of tasks) {
-        if (!["done", "failed"].includes(task.status) || Date.parse(task.updatedAt) < launchedAt) continue;
+        if (!["done", "failed"].includes(task.status) || task.resolvedAt || task.archivedAt || Date.parse(task.updatedAt) < launchedAt) continue;
         const key = `${task.id}:${task.attempts}:${task.status}`;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -218,8 +284,14 @@ function watchTaskNotifications() {
 }
 
 app.on("before-quit", () => {
+  app.isQuiting = true;
   clearInterval(clipboardTimer);
   clearInterval(notificationTimer);
+  clearInterval(updateTimer);
+  clearTimeout(updateStartupTimer);
+  updater?.dispose();
+  desktopIpc?.dispose();
+  coreRuntime?.inbox.stopInboxPoller();
 });
 app.on("window-all-closed", () => {
   // 托盘常驻，不随窗口关闭退出

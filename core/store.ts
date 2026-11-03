@@ -229,13 +229,23 @@ export function getItem(id: string): ItemRow | undefined {
   return getDb().prepare("SELECT * FROM items WHERE id = ?").get(id) as ItemRow | undefined;
 }
 
-export function listArticles(): (ArticleRow & { itemCount: number })[] {
-  return getDb()
+export function listArticles(): (ArticleRow & { itemCount: number; typeCounts: Record<string, number> })[] {
+  const articles = getDb()
     .prepare(
       `SELECT a.*, (SELECT COUNT(*) FROM items i WHERE i.article_id = a.id) AS itemCount
        FROM articles a ORDER BY fetched_at DESC`
     )
     .all() as unknown as (ArticleRow & { itemCount: number })[];
+  const grouped = getDb().prepare("SELECT article_id, type, COUNT(*) AS count FROM items GROUP BY article_id, type")
+    .all() as unknown as { article_id: string; type: string; count: number }[];
+  const counts = new Map<string, Record<string, number>>();
+  for (const row of grouped) {
+    if (!counts.has(row.article_id)) counts.set(row.article_id, {});
+    counts.get(row.article_id)![row.type] = row.count;
+  }
+  return articles.map(article => ({ ...article, typeCounts: {
+    palette: 0, website: 0, repo: 0, prompt: 0, note: 0, ...counts.get(article.id),
+  } }));
 }
 
 export function getArticle(id: string): ArticleRow | undefined {

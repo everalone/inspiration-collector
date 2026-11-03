@@ -2,16 +2,21 @@
 "use strict";
 
 const TYPE_LABEL = { palette: "配色", website: "网址", repo: "github", prompt: "提示词", note: "笔记" };
-const state = { type: "all", q: "", verify: null, items: [], selectedId: null, bootstrap: null,
-  loadingItems: false, itemTotal: 0, itemError: "", tasks: [], inbox: null, taskError: "" };
+const state = { type: "all", q: "", verify: null, items: [], articles: [], articleScopeId: null,
+  selectedArticleId: null, selectedId: null, keepArticleOverview: false, bootstrap: null,
+  loadingItems: false, itemTotal: 0, itemError: "", tasks: [], inbox: null, taskError: "",
+  submitting: false, submitError: "" };
 const imgCache = new Map(); // articleId -> Promise<string[]>
-const collapsedGroups = new Set(); // 折叠的文章分组
-let gallery = { files: [], idx: 0 };
+let gallery = { files: [], idx: 0, busy: false };
+let detailRevision = 0;
+let galleryTimer = null;
+let detailResizeObserver = null;
 
 const $ = (sel) => document.querySelector(sel);
 const toastEl = $("#toast");
 let toastTimer = null;
 let itemRequest = 0;
+let bootstrapRequest = 0;
 let taskPolling = false;
 let taskSnapshot = null;
 let remoteFailures = [];
@@ -66,7 +71,11 @@ function jsonPost(body) {
 
 /* ---------- 数据 ---------- */
 async function loadBootstrap() {
-  state.bootstrap = await requestJSON("/api/bootstrap");
+  const request = ++bootstrapRequest;
+  const bootstrap = await requestJSON("/api/bootstrap");
+  if (request !== bootstrapRequest) return;
+  state.bootstrap = bootstrap;
+  state.articles = Array.isArray(state.bootstrap.articles) ? state.bootstrap.articles : [];
   renderTabs();
   const b = state.bootstrap;
   const total = Object.values(b.typeCounts).reduce((a, c) => a + c, 0);
@@ -78,11 +87,19 @@ async function loadBootstrap() {
 }
 
 async function loadItems() {
+  if (state.articleScopeId && Array.isArray(state.bootstrap?.articles) &&
+      !state.articles.some(article => article.id === state.articleScopeId)) {
+    state.articleScopeId = null;
+    state.selectedArticleId = null;
+    state.selectedId = null;
+    state.keepArticleOverview = false;
+  }
   const request = ++itemRequest;
   const p = new URLSearchParams();
   if (state.type !== "all") p.set("type", state.type);
   if (state.q) p.set("q", state.q);
   if (state.verify) p.set("verify", state.verify);
+  if (state.articleScopeId) p.set("articleId", state.articleScopeId);
   p.set("limit", "200");
   state.loadingItems = true;
   state.itemError = "";
@@ -107,8 +124,15 @@ async function loadItems() {
       renderList();
       if (offset >= data.total) break;
     } while (true);
-    if (!state.items.some((it) => it.id === state.selectedId)) {
-      state.selectedId = state.items[0]?.id ?? null;
+    if (state.articleScopeId) {
+      if (state.keepArticleOverview) state.selectedId = null;
+      else if (!state.items.some(it => it.id === state.selectedId && it.article_id === state.articleScopeId)) {
+        state.selectedId = state.items.find(it => it.article_id === state.articleScopeId)?.id ?? null;
+      }
+    } else {
+      state.selectedId = null;
+      const parents = visibleArticles();
+      if (!parents.some(article => article.id === state.selectedArticleId)) state.selectedArticleId = parents[0]?.id ?? null;
     }
     renderDetail();
   } catch (error) {
@@ -137,7 +161,7 @@ function renderTabs() {
   $("#tabs").innerHTML = tabs
     .map(([k, label]) => {
       const active = k === "__unsure" ? !!state.verify : state.type === k && !state.verify;
-      return `<button class="tab ${active ? "active" : ""}" data-k="${k}">${label}</button>`;
+      return `<button class="tab ${active ? "active" : ""}" type="button" data-k="${k}" data-type="${k}" aria-pressed="${active}">${label}</button>`;
     })
     .join("");
 }
@@ -166,7 +190,7 @@ function listPreview(item, payload) {
 /* ---------- 左侧列表（按文章分组：父=微信链接，子=卡片） ---------- */
 function itemHtml(item) {
   const payload = safeParse(item.payload);
-  return `<div class="li ${item.id === state.selectedId ? "selected" : ""}" data-id="${item.id}">
+  return `<div class="li ${item.id === state.selectedId ? "selected" : ""}" data-id="${esc(item.id)}" tabindex="0" role="button" aria-pressed="${item.id === state.selectedId}">
     <div class="li-head">
       <span class="badge t-${item.type}">${TYPE_LABEL[item.type] ?? item.type}</span>
       <span class="li-title" title="${esc(item.title)}">${esc(item.title)}</span>
@@ -181,38 +205,108 @@ function itemHtml(item) {
   </div>`;
 }
 
-function renderList() {
-  const groups = [];
-  const map = new Map();
-  for (const it of state.items) {
-    if (!map.has(it.article_id)) {
-      const g = { id: it.article_id, article: it.article, items: [] };
-      map.set(it.article_id, g);
-      groups.push(g);
+function articleCatalog() {
+  const catalog = new Map(state.articles.map(article => [article.id, { ...article }]));
+  for (const item of state.items) {
+    if (!catalog.has(item.article_id)) catalog.set(item.article_id, {
+      ...item.article, id: item.article_id, itemCount: 0, typeCounts: {}, inferred: true,
+    });
+    const article = catalog.get(item.article_id);
+    if (article.inferred) {
+      article.itemCount++;
+      article.typeCounts[item.type] = (article.typeCounts[item.type] || 0) + 1;
     }
-    map.get(it.article_id).items.push(it);
   }
+  return [...catalog.values()];
+}
+
+function visibleArticles() {
+  const matchingIds = new Set(state.items.map(item => item.article_id));
+  const query = state.q.toLocaleLowerCase();
+  return articleCatalog().filter(article => {
+    if (state.type !== "all" && !(article.typeCounts?.[state.type] > 0 || matchingIds.has(article.id))) return false;
+    if (state.verify && !matchingIds.has(article.id)) return false;
+    if (!query) return true;
+    return matchingIds.has(article.id) || [article.title, article.account, article.summary]
+      .some(value => String(value || "").toLocaleLowerCase().includes(query));
+  });
+}
+
+function findArticle(id) { return articleCatalog().find(article => article.id === id) ?? null; }
+
+function renderList() {
   const notice = state.loadingItems
     ? `<div class="list-status" role="status">正在加载卡片…</div>`
     : state.itemError ? `<div class="list-status load-error" role="status">${esc(state.itemError)} <button class="mini-btn" data-reload-items>重新加载</button></div>` : "";
-  $("#list").innerHTML = notice + (
-    groups
-      .map((g) => {
-        const isCollapsed = collapsedGroups.has(g.id);
-        const sub = [g.article?.account, `${g.items.length} 张卡片`].filter(Boolean).join(" · ");
-        return `<div class="group">
-          <div class="group-head" data-gtoggle="${esc(g.id)}" data-article="${esc(g.id)}" title="${esc(g.article?.summary || g.article?.title || "")}">
-            <span class="caret ${isCollapsed ? "closed" : ""}">▾</span>
-            <div class="group-texts">
-              <div class="group-title">${esc(g.article?.title ?? "未知来源")}</div>
-              <div class="group-sub">${esc(sub)}</div>
-              ${g.article?.summary ? `<div class="group-sum">${esc(g.article.summary)}</div>` : ""}
-            </div>
-          </div>
-          ${isCollapsed ? "" : `<div class="group-items">${g.items.map(itemHtml).join("")}</div>`}
-        </div>`;
-      })
-      .join("") || (state.loadingItems ? "" : `<div class="empty">没有匹配的卡片</div>`));
+  const list = $("#list");
+  if (state.articleScopeId) {
+    const article = findArticle(state.articleScopeId);
+    const children = state.items.filter(item => item.article_id === state.articleScopeId &&
+      (state.type === "all" || item.type === state.type) && (!state.verify || item.verify_status === state.verify));
+    const label = state.verify ? "待核对" : TYPE_LABEL[state.type] || "全部卡片";
+    list.innerHTML = `<div class="list-context"><button class="back-to-articles mini-btn" data-back-articles type="button">← 返回文章</button>
+      <div class="scope-title">${esc(article?.title || "当前文章")}</div><div class="scope-meta">${esc(label)} · ${children.length} 张卡片</div></div>` + notice +
+      (children.map(itemHtml).join("") || (state.loadingItems ? "" : `<div class="empty">当前文章没有匹配的${esc(label)}${state.q ? "，试试其他搜索词" : ""}</div>`));
+    return;
+  }
+  const parents = visibleArticles();
+  const label = state.verify ? "待核对" : TYPE_LABEL[state.type];
+  const context = `<div class="list-context"><div class="scope-title">${label ? `${esc(label)} · 按文章浏览` : "我的文章"}</div>
+    <div class="scope-meta">${parents.length} 篇文章${label ? " · 选择文章查看卡片" : " · 选择一篇，展开灵感"}</div></div>`;
+  list.innerHTML = context + notice + (parents.map(article => {
+    const chips = Object.entries(TYPE_LABEL).filter(([type]) => article.typeCounts?.[type] > 0)
+      .map(([type, name]) => `<span class="badge t-${type}" data-type="${type}">${name} ${article.typeCounts[type]}</span>`).join("");
+    return `<div class="article-card ${article.id === state.selectedArticleId ? "selected" : ""}" data-article="${esc(article.id)}" data-select-article="${esc(article.id)}" role="button" tabindex="0" aria-pressed="${article.id === state.selectedArticleId}">
+      <div class="article-title">${esc(article.title || "未命名文章")}</div>
+      <div class="article-meta"><span>${esc(article.account || "来源作者未提供")}</span><span>${article.itemCount ?? 0} 张卡片</span></div>
+      <div class="article-types">${chips || '<span class="scope-meta">暂无提取卡片</span>'}</div>
+      <p class="article-summary">${esc(article.summary || article.description || "这篇文章尚无总结，点击查看原文图片。")}</p>
+    </div>`;
+  }).join("") || (state.loadingItems ? "" : '<div class="empty">没有匹配的文章</div>'));
+}
+
+async function selectTopTab(key) {
+  state.keepArticleOverview = false;
+  state.type = Object.hasOwn(TYPE_LABEL, key) ? key : "all";
+  state.verify = key === "__unsure" ? "unsure" : null;
+  state.articleScopeId = null;
+  state.selectedId = null;
+  state.selectedArticleId = null;
+  state.items = [];
+  renderTabs(); renderDetail();
+  $("#list").scrollTop = 0;
+  await loadItems();
+}
+
+async function selectArticle(id) {
+  if (!findArticle(id)) return;
+  state.keepArticleOverview = false;
+  state.selectedArticleId = id;
+  state.selectedId = null;
+  if (state.type !== "all" || state.verify) {
+    state.articleScopeId = id;
+    $("#list").scrollTop = 0;
+    await loadItems();
+  } else { renderList(); renderDetail(); }
+}
+
+async function enterArticleType(articleId, type) {
+  if (!findArticle(articleId) || !Object.hasOwn(TYPE_LABEL, type)) return;
+  state.keepArticleOverview = false;
+  state.type = type; state.verify = null;
+  state.articleScopeId = articleId; state.selectedArticleId = articleId; state.selectedId = null;
+  // Choosing a type is an explicit new path; an old search must not hide its cards.
+  state.q = ""; $("#search").value = "";
+  renderTabs(); renderDetail();
+  $("#list").scrollTop = 0;
+  await loadItems();
+}
+
+async function backToArticles() {
+  state.keepArticleOverview = false;
+  state.articleScopeId = null; state.selectedId = null;
+  $("#list").scrollTop = 0;
+  await loadItems();
 }
 
 /* ---------- 右侧详情 ---------- */
@@ -220,16 +314,42 @@ function articleImages(aid) {
   if (!imgCache.has(aid)) {
     imgCache.set(
       aid,
-      fetch(`/api/article-images?id=${encodeURIComponent(aid)}`)
-        .then((r) => r.json())
-        .then((d) => d.images ?? [])
-        .catch(() => [])
+      requestJSON(`/api/article-images?id=${encodeURIComponent(aid)}`)
+        .then(d => (Array.isArray(d.images) ? d.images : []).filter(src => typeof src === "string" && /^\/assets\//.test(src) && !/[<>"\r\n]/.test(src)))
+        .catch(error => { imgCache.delete(aid); throw error; })
     );
   }
   return imgCache.get(aid);
 }
 
 function renderDetail() {
+  const revision = ++detailRevision;
+  clearTimeout(galleryTimer);
+  gallery = { files: [], idx: 0, busy: false };
+  const el = $("#detail");
+  el.scrollTop = 0;
+  if (state.articleScopeId && selectedItem()) renderItemDetail(revision);
+  else if (state.selectedArticleId && findArticle(state.selectedArticleId)) renderArticleDetail(findArticle(state.selectedArticleId), revision);
+  else el.innerHTML = '<div class="empty welcome-empty"><span class="welcome-mark" aria-hidden="true">✦</span><h2>让灵感，有处可寻</h2><p>选择左侧文章，查看总结、分类卡片与原文。</p></div>';
+  observeDetailSize();
+  updateReadingProgress();
+}
+
+function renderArticleDetail(article, revision) {
+  const cards = Object.entries(TYPE_LABEL).filter(([type]) => article.typeCounts?.[type] > 0)
+    .map(([type, label]) => `<button class="type-summary-card" type="button" data-article-type="${type}" data-type="${type}" data-type-article="${esc(article.id)}" aria-label="查看本篇${label} ${article.typeCounts[type]} 张卡片">
+      <span class="type-label">${label}</span><span class="type-count">${article.typeCounts[type]}<span class="type-unit"> 张</span></span><span class="type-card-arrow" aria-hidden="true">↗</span></button>`).join("");
+  const imported = displayTime(article.processed_at || article.fetched_at) || "时间未记录";
+  $("#detail").innerHTML = `<article class="article-overview"><div class="article-eyebrow">ARTICLE / 文章总览</div>
+    <h2 class="article-detail-title">${esc(article.title || "未命名文章")}</h2>
+    <div class="article-detail-meta"><span class="article-author">${esc(article.account || "来源作者未提供")}</span><span class="article-imported">导入于 ${esc(imported)}</span></div>
+    <div class="article-type-grid">${cards || '<p class="muted">这篇文章暂无提取卡片</p>'}</div>
+    ${article.summary ? `<p class="article-summary detail-summary">${esc(article.summary)}</p>` : ""}
+    ${galleryMarkup()}<div class="d-foot"><a class="mini-btn" href="${esc(article.url || "#")}" target="_blank" rel="noopener">打开微信原文 ↗</a></div></article>`;
+  loadGallery(article.id, revision);
+}
+
+function renderItemDetail(revision) {
   const item = selectedItem();
   const el = $("#detail");
   if (!item) {
@@ -286,55 +406,128 @@ function renderDetail() {
       <div class="d-actions"><button class="mini-btn" data-copy="${esc(md)}">复制为 Markdown</button></div>`;
   }
 
-  el.innerHTML = `${head}${body}<img id="detail-img" class="detail-img hidden" data-srcimg="${item.article_id}" alt="来源原图（点击放大）">
-    <div id="gallery" class="gallery hidden">
-      <div class="gallery-title">文章全部轮播图（左右切换，点击放大）</div>
-      <div class="gallery-main">
-        <button class="g-btn g-prev" title="上一张">‹</button>
-        <img id="gallery-img" alt="轮播图">
-        <button class="g-btn g-next" title="下一张">›</button>
-        <span class="g-counter" id="g-counter"></span>
-      </div>
-    </div>${source}`;
+  el.innerHTML = `<button class="mini-btn detail-back" type="button" data-article-overview="${esc(item.article_id)}">← 文章总览</button>${head}${body}<img id="detail-img" class="detail-img hidden" data-srcimg="${item.article_id}" alt="来源原图（点击放大）">
+    ${galleryMarkup()}${source}`;
+  loadGallery(item.article_id, revision, item);
+}
 
-  // 异步取来源原图；有 bbox 时按区域裁剪，点开放大看完整图
-  articleImages(item.article_id).then((files) => {
-    if (state.selectedId !== item.id) return;
+function galleryMarkup() {
+  return `<section id="gallery" class="gallery article-gallery" aria-label="文章原图" aria-busy="true">
+    <div class="gallery-title"><span>原文画廊</span><span class="gallery-hint">左右滑动 · 点击放大</span></div>
+    <p id="gallery-message" class="gallery-message" role="status">正在读取原文图片…</p>
+    <div class="gallery-main hidden"><button class="g-btn g-prev" type="button" aria-label="上一张原图" title="上一张">‹</button>
+      <div class="gallery-viewport" tabindex="0" aria-label="原文图片，可用左右方向键切换"><div class="gallery-slide"><img id="gallery-img" draggable="false" alt="文章原图"></div></div>
+      <button class="g-btn g-next" type="button" aria-label="下一张原图" title="下一张">›</button>
+      <span class="g-counter" id="g-counter" aria-live="polite"></span></div></section>`;
+}
+
+function loadGallery(articleId, revision, item = null) {
+  articleImages(articleId).then(files => {
+    if (detailRevision !== revision) return;
     const img = document.getElementById("detail-img");
     const gal = document.getElementById("gallery");
     if (!gal) return;
-    if (!files.length) { img?.remove(); gal.remove(); return; }
-    const idx = Math.min(Number(item.source_image_index ?? 0), files.length - 1);
+    gal.setAttribute?.("aria-busy", "false");
+    const message = $("#gallery-message");
+    if (!files.length) {
+      img?.remove();
+      if (message) message.textContent = "这篇文章没有可显示的原文图片";
+      updateReadingProgress(); return;
+    }
+    const idx = Math.max(0, Math.min(Number(item?.source_image_index) || 0, files.length - 1));
     const raw = files[idx];
-    const bbox = safeParse(item.bbox, null);
-    if (img) {
+    const bbox = safeParse(item?.bbox, null);
+    if (img && item) {
       if (Array.isArray(bbox) && bbox.length === 4 && bbox[2] > bbox[0] && bbox[3] > bbox[1]) {
-        img.src = `/api/crop?article=${encodeURIComponent(item.article_id)}&idx=${idx}&x1=${bbox[0]}&y1=${bbox[1]}&x2=${bbox[2]}&y2=${bbox[3]}`;
+        img.src = `/api/crop?article=${encodeURIComponent(articleId)}&idx=${idx}&x1=${bbox[0]}&y1=${bbox[1]}&x2=${bbox[2]}&y2=${bbox[3]}`;
       } else {
         img.src = raw;
       }
       img.dataset.full = raw;
       img.classList.remove("hidden");
     }
-    // 轮播画廊：定位到当前卡对应的那张，可左右切换看全部
-    gallery = { files, idx };
-    gal.classList.remove("hidden");
+    gallery = { files, idx, busy: false };
+    message?.classList.add("hidden");
+    gal.querySelector?.(".gallery-main")?.classList.remove("hidden");
     updateGallery();
+    observeDetailSize();
+  }).catch(error => {
+    if (detailRevision !== revision) return;
+    const message = $("#gallery-message");
+    if (message) message.innerHTML = `${esc(errorText(error))} <button class="mini-btn" data-retry-gallery type="button">重新加载图片</button>`;
+    $("#gallery")?.setAttribute?.("aria-busy", "false");
   });
 }
 
 function updateGallery() {
   const img = document.getElementById("gallery-img");
   if (!img || !gallery.files.length) return;
-  img.src = gallery.files[gallery.idx];
+  const revision = detailRevision, source = gallery.files[gallery.idx];
+  const isCurrent = () => revision === detailRevision && document.getElementById("gallery-img") === img && gallery.files[gallery.idx] === source;
+  img.alt = `文章原图 ${gallery.idx + 1} / ${gallery.files.length}`;
+  img.onload = () => {
+    if (!isCurrent()) return;
+    $("#gallery-message")?.classList.add("hidden");
+    updateReadingProgress();
+  };
+  img.onerror = () => {
+    if (!isCurrent()) return;
+    const message = $("#gallery-message");
+    if (message) { message.textContent = "这张图片暂时无法显示，可切换其他图片或重新打开文章"; message.classList.remove("hidden"); }
+  };
+  img.src = source;
   const counter = $("#g-counter");
   if (counter) counter.textContent = `${gallery.idx + 1} / ${gallery.files.length}`;
+  for (const button of document.querySelectorAll(".g-prev, .g-next")) button.disabled = gallery.files.length < 2;
+  updateReadingProgress();
 }
 
 function galleryMove(delta) {
-  if (!gallery.files.length) return;
+  if (gallery.files.length < 2 || gallery.busy) return;
+  const viewport = $(".gallery-viewport");
+  const oldSlide = viewport?.querySelector?.(".gallery-slide:not(.is-outgoing)");
+  const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
   gallery.idx = (gallery.idx + delta + gallery.files.length) % gallery.files.length;
+  $("#gallery-message")?.classList.add("hidden");
+  if (oldSlide && !reduceMotion) {
+    gallery.busy = true;
+    const oldImage = oldSlide.querySelector("img");
+    oldImage?.removeAttribute("id");
+    oldSlide.classList.add("is-outgoing", delta > 0 ? "exit-to-left" : "exit-to-right");
+    oldSlide.setAttribute("aria-hidden", "true");
+    const incoming = document.createElement("div");
+    incoming.className = `gallery-slide ${delta > 0 ? "enter-from-right" : "enter-from-left"}`;
+    incoming.innerHTML = '<img id="gallery-img" draggable="false" alt="文章原图">';
+    viewport.appendChild(incoming);
+    // Commit the off-centre tilted pose before the transition to the resting pose.
+    void incoming.offsetWidth;
+    incoming.classList.remove("enter-from-right", "enter-from-left");
+    const revision = detailRevision;
+    galleryTimer = setTimeout(() => {
+      oldSlide.remove();
+      if (detailRevision === revision) gallery.busy = false;
+    }, 440);
+  }
   updateGallery();
+}
+
+function updateReadingProgress() {
+  const detail = $("#detail"), fill = $("#reading-progress-fill"), track = $("#reading-progress");
+  if (!detail || !fill) return 0;
+  const extent = Math.max(0, Number(detail.scrollHeight) - Number(detail.clientHeight));
+  const value = extent > 1 ? Math.max(0, Math.min(100, (Number(detail.scrollTop) || 0) / extent * 100)) : 0;
+  fill.style.width = `${value}%`;
+  track?.setAttribute?.("aria-valuenow", String(Math.round(value)));
+  return value;
+}
+
+function observeDetailSize() {
+  if (typeof ResizeObserver === "undefined") return;
+  if (!detailResizeObserver) detailResizeObserver = new ResizeObserver(updateReadingProgress);
+  detailResizeObserver.disconnect();
+  const detail = $("#detail");
+  detailResizeObserver.observe(detail);
+  for (const child of detail.children) detailResizeObserver.observe(child);
 }
 
 /* ---------- 编辑弹窗 ---------- */
@@ -439,8 +632,8 @@ function openSettings(section) {
       <input type="number" id="s-inbox-interval" min="10" max="120" step="1" value="${esc(c.inboxIntervalSec ?? 30)}">
       <div id="inbox-status" class="modal-hint" role="status"></div>
       <div class="modal-hint" style="margin-top:12px">iPhone 快捷指令：POST 到收件箱 URL 下的 <code>/collect</code>，Header <code>Authorization: Bearer 你的token</code>，JSON body <code>{"url":"…"}</code>。服务器接收后会等待本机处理，接收成功不等于已经入库。</div>
-      <div class="task-heading"><h3>收集任务</h3><button class="mini-btn" id="tasks-refresh" type="button">刷新状态</button></div>
-      <div class="modal-hint">任务在后台处理，可关闭设置继续浏览。失败后可重试。</div>
+      <div class="task-heading"><h3>收集任务</h3><div><button class="mini-btn" id="tasks-archive" type="button">清空已完成记录</button> <button class="mini-btn" id="tasks-refresh" type="button">刷新状态</button></div></div>
+      <div class="modal-hint">显示最近 10 条完成记录，进行中和待处理失败继续保留。清空记录不会删除已导入文章。</div>
       <div id="tasks-list" class="task-list"></div>
       <div id="inbox-failures" class="task-list"></div>
       <h3 style="margin-top:18px">重跑提取</h3>
@@ -469,6 +662,7 @@ function openSettings(section) {
         void confirmAndReprocess(ids);
       };
       $("#tasks-refresh").onclick = () => refreshTaskPanel();
+      $("#tasks-archive").onclick = () => archiveCompletedTasks();
       renderTaskStatus();
       void refreshTaskPanel();
       if (section === "tasks") $("#tasks-list").scrollIntoView({ block: "center" });
@@ -488,8 +682,6 @@ function failureReportHtml(report) {
 }
 function inboxAttemptText(task) {
   if (task.source !== "inbox") return "";
-  const laterSuccess = state.tasks.some(other => other.url === task.url && other.status === "done" && other.updatedAt > task.updatedAt);
-  if (task.status === "failed" && laterSuccess) return "先前尝试失败，后续已成功导入，无需重试。";
   const attempt = task.inbox?.attempt;
   const max = task.inbox?.maxAttempts || 3;
   const remote = remoteFailures.find(item => (task.inbox?.id ? item.id === task.inbox.id : item.url === task.url) &&
@@ -499,6 +691,29 @@ function inboxAttemptText(task) {
   return task.status === "failed" ? "本次处理失败；手机任务每轮最多尝试 3 次，最终失败条目见下方。" : "";
 }
 
+// Counter and rows share one projection. Older task snapshots may still contain
+// separate attempts, so collapse those in the viewer as well as in the queue.
+function visibleTasks() {
+  const ordered = state.tasks.map((task, index) => ({ task, index })).sort((a, b) =>
+    (Date.parse(b.task.updatedAt) || 0) - (Date.parse(a.task.updatedAt) || 0) ||
+    (b.task.completedOrder ?? -b.index) - (a.task.completedOrder ?? -a.index));
+  const successes = [];
+  const pending = new Set();
+  let completed = 0;
+  return ordered.filter(({ task }) => {
+    if (task.status === "done") successes.push(task);
+    if (task.archivedAt || task.resolvedBy) return false;
+    if (task.status === "done") return ++completed <= 10;
+    const key = `${task.url}\0${!!task.refresh}`;
+    if (task.status === "failed") {
+      if (successes.some(success => success.url === task.url && (!task.refresh || (success.refresh && !success.result?.skipped)))) return false;
+      if (pending.has(key)) return false;
+    }
+    pending.add(key);
+    return true;
+  }).map(({ task }) => task);
+}
+
 function displayTime(value) {
   if (!value) return "";
   const date = new Date(value);
@@ -506,13 +721,33 @@ function displayTime(value) {
 }
 
 function renderTaskStatus() {
-  const active = state.tasks.filter((task) => task.status === "queued" || task.status === "running").length;
-  const failed = state.tasks.filter((task) => task.status === "failed").length;
-  $("#tasks-btn").textContent = state.taskError ? "任务 · 状态不可用" : active ? `任务 · ${active} 条处理中` : failed ? `任务 · ${failed} 条失败` : "任务";
+  const tasks = visibleTasks();
+  const active = tasks.filter((task) => task.status === "queued" || task.status === "running").length;
+  const failed = new Set(tasks.filter((task) => task.status === "failed").map(task => task.url)).size;
+  const button = $("#tasks-btn");
+  let phase = "idle", label = "任务", icon = "";
+  if (active || state.submitting) {
+    phase = "processing";
+    label = state.submitting && !active ? "提交中" : `${active} 条处理中`;
+    if (failed) label += ` · ${failed} 条失败`;
+    icon = '<span class="task-spinner" aria-hidden="true"></span>';
+  } else if (failed || state.taskError || state.submitError) {
+    phase = "failed"; label = failed ? `${failed} 条失败` : state.taskError ? "状态读取失败" : "提交失败";
+    icon = '<span class="task-status-icon" aria-hidden="true">!</span>';
+  } else if (tasks.some(task => task.status === "done")) {
+    phase = "success"; label = "已完成";
+    icon = '<span class="task-status-icon" aria-hidden="true">✓</span>';
+  }
+  button.dataset.phase = phase;
+  button.textContent = label;
+  if (icon) button.insertAdjacentHTML("afterbegin", icon);
+  button.setAttribute?.("aria-busy", String(phase === "processing"));
+  button.title = `${label} · 点击查看任务记录`;
+  syncSubmitButton();
   const list = $("#tasks-list");
   if (!list) return;
   list.innerHTML = (state.taskError ? `<div class="task-error" role="status">状态更新失败：${esc(state.taskError)}</div>` : "") +
-    (state.tasks.map((task) => `<div class="task-row">
+    (tasks.map((task) => `<div class="task-row">
       <div class="task-info"><div class="task-title">${esc(task.title || task.url || "收集任务")}</div>
       <div class="task-meta"><span class="task-state ${esc(task.status)}">${esc(TASK_LABEL[task.status] || "状态未知")}</span>${task.result?.skipped ? " · 已收藏，未重复分析" : ""}${task.source === "inbox" ? " · 手机收集" : ""}${task.updatedAt ? " · " + esc(displayTime(task.updatedAt)) : ""}</div>
       ${task.failureReport ? failureReportHtml(task.failureReport) : task.error ? `<div class="task-error">${esc(errorText(task.error))}</div>` : ""}
@@ -535,6 +770,17 @@ function renderTaskStatus() {
       <div class="task-info"><div class="task-title">${esc(item.failureReport?.articleTitle || item.url)}</div><div class="task-meta">已尝试 ${esc(item.attempts)}/${esc(item.maxAttempts || 3)} 次，已停止自动重试。</div>${item.failureReport ? failureReportHtml(item.failureReport) : `<div class="task-error">${esc(errorText(item.error || "处理失败"))}</div>`}</div>
       <button class="mini-btn" type="button" data-inbox-retry="${esc(item.id)}">重新排队（新一轮）</button>
     </div>`).join("") : "";
+}
+
+async function archiveCompletedTasks() {
+  const button = $("#tasks-archive");
+  if (button) button.disabled = true;
+  try {
+    await requestJSON("/api/tasks/archive", jsonPost({}));
+    await refreshTasks();
+    toast("已清空完成记录，文章和卡片仍保留");
+  } catch (error) { toast("清空记录失败：" + errorText(error)); }
+  finally { if (button?.isConnected) button.disabled = false; }
 }
 
 async function refreshTasks() {
@@ -800,6 +1046,16 @@ document.addEventListener("click", async (e) => {
   const retry = t.closest("[data-task-retry], [data-inbox-retry]");
   if (retry) { await retryTask(retry.dataset.taskRetry || retry.dataset.inboxRetry, retry, !!retry.dataset.inboxRetry); return; }
   if (t.closest("[data-reload-items]")) { await loadItems(); return; }
+  if (t.closest("[data-back-articles]")) { await backToArticles(); return; }
+  const typeCard = t.closest("[data-article-type]");
+  if (typeCard) { await enterArticleType(typeCard.dataset.typeArticle, typeCard.dataset.articleType); return; }
+  const articleOverview = t.closest("[data-article-overview]");
+  if (articleOverview) {
+    state.keepArticleOverview = true;
+    state.selectedId = null; state.selectedArticleId = articleOverview.dataset.articleOverview;
+    renderList(); renderDetail(); return;
+  }
+  if (t.closest("[data-retry-gallery]")) { renderDetail(); return; }
 
   const copyEl = t.closest("[data-copy]");
   if (copyEl) {
@@ -811,17 +1067,14 @@ document.addEventListener("click", async (e) => {
   if (gprev) { galleryMove(-1); return; }
   const gnext = t.closest(".g-next");
   if (gnext) { galleryMove(1); return; }
-  if (t.closest("#gallery-img")) {
+  if (t.closest("#gallery-img") && !suppressGalleryClick) {
     $("#lightbox-img").src = t.src;
     $("#lightbox").classList.remove("hidden");
     return;
   }
-  const ghead = t.closest("[data-gtoggle]");
+  const ghead = t.closest("[data-select-article]");
   if (ghead) {
-    const id = ghead.dataset.gtoggle;
-    if (collapsedGroups.has(id)) collapsedGroups.delete(id);
-    else collapsedGroups.add(id);
-    renderList();
+    await selectArticle(ghead.dataset.selectArticle);
     return;
   }
   const jump = t.closest("[data-notejump]");
@@ -850,16 +1103,14 @@ document.addEventListener("click", async (e) => {
   }
   const tab = t.closest(".tab");
   if (tab) {
-    const k = tab.dataset.k;
-    if (k === "__unsure") state.verify = state.verify ? null : "unsure";
-    else { state.type = k; state.verify = null; }
-    renderTabs();
-    loadItems();
+    await selectTopTab(tab.dataset.k);
     return;
   }
   const li = t.closest(".li");
   if (li) {
+    state.keepArticleOverview = false;
     state.selectedId = li.dataset.id;
+    state.selectedArticleId = selectedItem()?.article_id ?? state.selectedArticleId;
     renderList();
     renderDetail();
     return;
@@ -871,11 +1122,40 @@ $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") clos
 
 // 轮播图支持键盘左右切换
 document.addEventListener("keydown", (e) => {
+  if (!$("#modal").classList.contains("hidden") || !$("#lightbox").classList.contains("hidden")) {
+    if (e.key === "Escape") { closeModal(); $("#lightbox").classList.add("hidden"); }
+    return;
+  }
+  if (e.target?.closest?.("input, textarea, select, [contenteditable=true]")) return;
+  const card = e.target?.closest?.(".article-card, .li");
+  if (card && e.target === card && ["Enter", " "].includes(e.key)) { e.preventDefault(); card.click(); return; }
   const g = document.getElementById("gallery");
   if (!g || g.classList.contains("hidden")) return;
-  if (e.key === "ArrowLeft") galleryMove(-1);
-  if (e.key === "ArrowRight") galleryMove(1);
+  if (e.key === "ArrowLeft") { e.preventDefault(); galleryMove(-1); }
+  if (e.key === "ArrowRight") { e.preventDefault(); galleryMove(1); }
 });
+
+// A horizontal drag changes image; a vertical movement remains ordinary reading.
+let galleryPointer = null;
+let suppressGalleryClick = false;
+$("#detail").addEventListener("pointerdown", e => {
+  if (!e.target.closest?.(".gallery-viewport") || e.button > 0) return;
+  galleryPointer = { id: e.pointerId, x: e.clientX, y: e.clientY };
+  suppressGalleryClick = false;
+});
+document.addEventListener("pointerup", e => {
+  if (!galleryPointer || galleryPointer.id !== e.pointerId) return;
+  const dx = e.clientX - galleryPointer.x, dy = e.clientY - galleryPointer.y;
+  galleryPointer = null;
+  if (Math.abs(dx) < 45 || Math.abs(dx) < Math.abs(dy) * 1.3) return;
+  suppressGalleryClick = true;
+  galleryMove(dx < 0 ? 1 : -1);
+  setTimeout(() => { suppressGalleryClick = false; }, 0);
+});
+document.addEventListener("pointercancel", () => { galleryPointer = null; });
+$("#detail").addEventListener("scroll", updateReadingProgress, { passive: true });
+$("#detail").addEventListener("load", updateReadingProgress, true);
+window.addEventListener("resize", updateReadingProgress);
 
 /* ---------- 左右栏宽拖拽 ---------- */
 const aside = $("#list");
@@ -908,29 +1188,51 @@ $("#search").addEventListener("input", (e) => {
 /* ---------- 收集入口 ---------- */
 $("#ingest-btn").addEventListener("click", () => doIngest());
 $("#ingest-input").addEventListener("keydown", (e) => { if (e.key === "Enter") doIngest(); });
+$("#ingest-input").addEventListener("input", syncSubmitButton);
+
+function collectionIdentity(value) {
+  try {
+    const url = new URL(value.trim());
+    if (url.hostname !== "mp.weixin.qq.com" || url.protocol !== "https:" || url.username || url.password || url.port) return null;
+    if (/^\/s\/[A-Za-z0-9_-]+\/?$/.test(url.pathname)) return `https://mp.weixin.qq.com${url.pathname.replace(/\/$/, "")}`;
+    if (url.pathname === "/s" && url.searchParams.get("__biz") && url.searchParams.get("sn")) { url.hash = ""; return url.href; }
+  } catch { /* Validate without disclosing raw input. */ }
+  return null;
+}
+
+function syncSubmitButton() {
+  const button = $("#ingest-btn"), input = $("#ingest-input");
+  if (!button || !input) return;
+  const identity = collectionIdentity(input.value || "");
+  const duplicate = !!identity && state.tasks.some(task => ["queued", "running"].includes(task.status) && collectionIdentity(task.url) === identity);
+  button.disabled = state.submitting || duplicate;
+  button.textContent = state.submitting ? "提交中…" : duplicate ? "已在处理中" : "收集";
+  button.setAttribute?.("aria-busy", String(state.submitting));
+  button.title = duplicate ? "这个链接已加入队列，处理完成后可查看结果" : "将文章加入收集队列";
+}
 
 async function doIngest() {
   const input = $("#ingest-input");
   const btn = $("#ingest-btn");
   const url = input.value.trim();
-  if (btn.disabled) return;
-  try {
-    const parsed = new URL(url);
-    if (parsed.hostname !== "mp.weixin.qq.com" || !["https:", "http:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error();
-  } catch { toast("请粘贴微信公众号文章链接"); return; }
-  btn.disabled = true;
-  btn.textContent = "提交中…";
+  syncSubmitButton();
+  if (btn.disabled || state.submitting) return;
+  if (!collectionIdentity(url)) { toast("请粘贴 https://mp.weixin.qq.com/s/ 开头的文章链接"); return; }
+  state.submitting = true; state.submitError = "";
+  renderTaskStatus();
   try {
     const data = await requestJSON("/api/tasks", jsonPost({ url }));
     if (!data.task?.id) throw new Error("服务未返回收集任务，请刷新任务状态确认");
+    state.tasks = [data.task, ...state.tasks.filter(task => task.id !== data.task.id)];
     if (input.value.trim() === url) input.value = "";
     toast(data.task.status === "done" ? (data.task.result?.skipped ? "链接已收藏，无需重复分析" : "该收集任务已完成") : data.task.status === "running" ? "该链接正在处理，可继续浏览" : "已加入队列，等待处理");
     void refreshTasks();
   } catch (err) {
+    state.submitError = errorText(err);
     toast("提交失败：" + errorText(err));
   } finally {
-    btn.disabled = false;
-    btn.textContent = "收集";
+    state.submitting = false;
+    renderTaskStatus();
   }
 }
 
