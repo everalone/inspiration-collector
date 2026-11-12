@@ -155,13 +155,13 @@ function selectedItem() {
 function renderTabs() {
   const c = state.bootstrap.typeCounts;
   const total = Object.values(c).reduce((a, b) => a + b, 0);
-  const tabs = [["all", `全部 ${total}`]];
-  for (const [t, label] of Object.entries(TYPE_LABEL)) tabs.push([t, `${label} ${c[t] ?? 0}`]);
-  tabs.push(["__unsure", `待核对 ${state.bootstrap.unsureCount}`]);
+  const tabs = [["all", "全部", total]];
+  for (const [t, label] of Object.entries(TYPE_LABEL)) tabs.push([t, label, c[t] ?? 0]);
+  tabs.push(["__unsure", "待核对", state.bootstrap.unsureCount]);
   $("#tabs").innerHTML = tabs
-    .map(([k, label]) => {
+    .map(([k, label, count]) => {
       const active = k === "__unsure" ? !!state.verify : state.type === k && !state.verify;
-      return `<button class="tab ${active ? "active" : ""}" type="button" data-k="${k}" data-type="${k}" aria-pressed="${active}">${label}</button>`;
+      return `<button class="tab ${active ? "active" : ""}" type="button" data-k="${k}" data-type="${k}" aria-pressed="${active}"><span>${esc(label)}</span><span class="n">${esc(count)}</span></button>`;
     })
     .join("");
 }
@@ -190,7 +190,7 @@ function listPreview(item, payload) {
 /* ---------- 左侧列表（按文章分组：父=微信链接，子=卡片） ---------- */
 function itemHtml(item) {
   const payload = safeParse(item.payload);
-  return `<div class="li ${item.id === state.selectedId ? "selected" : ""}" data-id="${esc(item.id)}" tabindex="0" role="button" aria-pressed="${item.id === state.selectedId}">
+  return `<div class="li ${item.id === state.selectedId ? "selected" : ""}" data-type="${esc(item.type)}" data-id="${esc(item.id)}" tabindex="0" role="button" aria-pressed="${item.id === state.selectedId}">
     <div class="li-head">
       <span class="badge t-${item.type}">${TYPE_LABEL[item.type] ?? item.type}</span>
       <span class="li-title" title="${esc(item.title)}">${esc(item.title)}</span>
@@ -547,9 +547,9 @@ function modalHtml(item) {
   const payload = safeParse(item.payload);
   let body = "";
   if (item.type === "palette") {
-    body = `<label>说明（原文对这套配色的解释，可留空）</label><input type="text" id="f-desc" value="${esc(payload.desc ?? "")}">
-      <label>颜色</label><div id="color-rows">${(payload.colors ?? []).map((c) => colorRow(c.hex, c.name ?? "")).join("")}</div>
-      <button class="add-color" onclick="addColorRow()">＋ 添加颜色</button>`;
+    body = `<label>颜色</label><div id="color-rows">${(payload.colors ?? []).map((c) => colorRow(c.hex, c.name ?? "")).join("")}</div>
+      <button class="add-color" onclick="addColorRow()">＋ 添加颜色</button>
+      <label>说明（原文对这套配色的解释，可留空）</label><input type="text" id="f-desc" value="${esc(payload.desc ?? "")}">`;
   } else if (item.type === "website" || item.type === "repo") {
     body = `<label>网址</label><input type="text" id="f-url" value="${esc(payload.url ?? "")}">
       <label>说明</label><input type="text" id="f-desc" value="${esc(payload.desc ?? "")}">`;
@@ -752,7 +752,7 @@ function renderTaskStatus() {
       <div class="task-meta"><span class="task-state ${esc(task.status)}">${esc(TASK_LABEL[task.status] || "状态未知")}</span>${task.result?.skipped ? " · 已收藏，未重复分析" : ""}${task.source === "inbox" ? " · 手机收集" : ""}${task.updatedAt ? " · " + esc(displayTime(task.updatedAt)) : ""}</div>
       ${task.failureReport ? failureReportHtml(task.failureReport) : task.error ? `<div class="task-error">${esc(errorText(task.error))}</div>` : ""}
       ${inboxAttemptText(task) ? `<div class="task-meta">${esc(inboxAttemptText(task))}</div>` : ""}</div>
-      ${task.status === "failed" && task.source !== "inbox" ? `<button class="mini-btn" type="button" data-task-retry="${esc(task.id)}">重试</button>` : ""}
+      ${task.status === "failed" ? `<div class="task-record-actions">${task.source !== "inbox" ? `<button class="mini-btn" type="button" data-task-retry="${esc(task.id)}">重试</button>` : ""}<button class="mini-btn danger" type="button" data-task-delete="${esc(task.id)}" title="仅删除任务记录，保留文章和卡片">删除记录</button></div>` : ""}
     </div>`).join("") || `<div class="task-empty">暂无收集任务</div>`);
   const inbox = state.inbox;
   const connection = $("#inbox-status");
@@ -781,6 +781,20 @@ async function archiveCompletedTasks() {
     toast("已清空完成记录，文章和卡片仍保留");
   } catch (error) { toast("清空记录失败：" + errorText(error)); }
   finally { if (button?.isConnected) button.disabled = false; }
+}
+
+async function deleteTaskRecord(id, button) {
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = "删除中…";
+  try {
+    await requestJSON(`/api/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+    await refreshTaskPanel();
+    toast("已删除失败记录，文章和卡片仍保留");
+  } catch (error) { toast("删除记录失败：" + errorText(error)); }
+  finally {
+    if (button.isConnected) { button.disabled = false; button.textContent = "删除记录"; }
+  }
 }
 
 async function refreshTasks() {
@@ -963,6 +977,7 @@ async function saveSettings() {
   const inboxEnabled = $("#s-inbox-enabled").checked;
   const inboxIntervalSec = Number($("#s-inbox-interval").value);
   if (!Number.isInteger(inboxIntervalSec) || inboxIntervalSec < 10 || inboxIntervalSec > 120) {
+    $("#s-inbox-interval").setAttribute("aria-invalid", "true");
     toast("检查间隔需为 10–120 秒的整数");
     return;
   }
@@ -1043,6 +1058,8 @@ async function deleteItem(id, fromModal = false) {
 document.addEventListener("click", async (e) => {
   const t = e.target;
 
+  const deleteRecord = t.closest("[data-task-delete]");
+  if (deleteRecord) { await deleteTaskRecord(deleteRecord.dataset.taskDelete, deleteRecord); return; }
   const retry = t.closest("[data-task-retry], [data-inbox-retry]");
   if (retry) { await retryTask(retry.dataset.taskRetry || retry.dataset.inboxRetry, retry, !!retry.dataset.inboxRetry); return; }
   if (t.closest("[data-reload-items]")) { await loadItems(); return; }
@@ -1208,6 +1225,7 @@ function syncSubmitButton() {
   button.disabled = state.submitting || duplicate;
   button.textContent = state.submitting ? "提交中…" : duplicate ? "已在处理中" : "收集";
   button.setAttribute?.("aria-busy", String(state.submitting));
+  input.setAttribute?.("aria-busy", String(state.submitting));
   button.title = duplicate ? "这个链接已加入队列，处理完成后可查看结果" : "将文章加入收集队列";
 }
 
@@ -1217,7 +1235,8 @@ async function doIngest() {
   const url = input.value.trim();
   syncSubmitButton();
   if (btn.disabled || state.submitting) return;
-  if (!collectionIdentity(url)) { toast("请粘贴 https://mp.weixin.qq.com/s/ 开头的文章链接"); return; }
+  if (!collectionIdentity(url)) { input.setAttribute?.("aria-invalid", "true"); toast("请粘贴 https://mp.weixin.qq.com/s/ 开头的文章链接"); return; }
+  input.removeAttribute?.("aria-invalid");
   state.submitting = true; state.submitError = "";
   renderTaskStatus();
   try {
@@ -1235,6 +1254,10 @@ async function doIngest() {
     renderTaskStatus();
   }
 }
+
+document.addEventListener("input", event => {
+  event.target?.removeAttribute?.("aria-invalid");
+});
 
 loadBootstrap().then(async () => {
   await refreshTasks();

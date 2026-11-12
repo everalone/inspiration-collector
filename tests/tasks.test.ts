@@ -11,6 +11,50 @@ function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inspiration-tasks-'));
   return { dir, filePath: path.join(dir, 'tasks.json') };
 }
+
+test('deleting a failure hides collapsed attempts durably while keeping inbox replay and later rounds', async () => {
+  const { filePath } = fixture(); let calls = 0;
+  const process = async () => { calls++; throw new Error('no article content'); };
+  const queue = createTaskQueue({ filePath, process });
+  const url = 'https://mp.weixin.qq.com/s/delete-failure';
+  const context = { id: 'remote-delete', generation: 'round-one', maxAttempts: 3 };
+  let latest = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    latest = queue.enqueue(url, 'inbox', false, { ...context, attempt }).id;
+    await assert.rejects(queue.wait(latest));
+  }
+  assert.equal(queue.archiveFailure(latest).archived, 3);
+  assert.equal(queue.archiveFailure(latest).archived, 0);
+  assert.deepEqual(queue.list(), []);
+  const restarted = createTaskQueue({ filePath, process });
+  assert.deepEqual(restarted.list(), []);
+  assert.equal(restarted.isInboxFailureArchived({ ...context, attempts: 3 }), true);
+  assert.equal(restarted.isInboxFailureArchived({ ...context, generation: 'round-two', attempts: 3 }), false);
+  const replay = restarted.enqueue(url, 'inbox', false, { ...context, attempt: 3 });
+  assert.equal(replay.id, latest);
+  await assert.rejects(restarted.wait(replay.id), /no article content/);
+  assert.equal(calls, 3);
+  assert.throws(() => restarted.retry(latest), /已删除/);
+  const next = restarted.enqueue(url, 'inbox', false, { ...context, generation: 'round-two', attempt: 1 });
+  await assert.rejects(restarted.wait(next.id));
+  assert.deepEqual(restarted.list().map(t => t.id), [next.id]);
+});
+
+test('failure deletion refuses active/completed work and rolls back on persistence failure', async (t) => {
+  const { filePath } = fixture();
+  const queue = createTaskQueue({ filePath, process: async () => result('kept') });
+  const pending = queue.enqueue('https://mp.weixin.qq.com/s/keep-active');
+  assert.throws(() => queue.archiveFailure(pending.id), /只能删除失败/);
+  await queue.wait(pending.id);
+  assert.throws(() => queue.archiveFailure(pending.id), /只能删除失败/);
+  assert.throws(() => queue.archiveFailure('missing'), /任务不存在/);
+  const failed = createTaskQueue({ filePath: fixture().filePath, process: async () => { throw new Error('failed'); } });
+  const item = failed.enqueue('https://mp.weixin.qq.com/s/rollback');
+  await assert.rejects(failed.wait(item.id));
+  t.mock.method(fs, 'renameSync', () => { throw new Error('disk full'); });
+  assert.throws(() => failed.archiveFailure(item.id), /disk full/);
+  assert.equal(failed.list()[0].archivedAt, undefined);
+});
 const result = (title: string) => ({ articleId: title, title, account: '', articleType: 'note', summary: '', tags: [], counts: { note: 1 }, unsureCount: 0, items: [] });
 
 test('two failed inbox attempts are archived after the third succeeds without losing replay outcomes', async () => {

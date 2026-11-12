@@ -2,7 +2,7 @@
 
 把值得留存的微信公众号文章链接丢进来，自动抓取并用视觉大模型把内容**拆解成一张张"可复制的灵感卡片"**——配色（含色值）、网址、GitHub 项目、提示词、方法论笔记——形成可检索、可校验、可持续积累的本地灵感库。
 
-**v0.2.4.1** 集成应用内更新、任务记录归档、统一磨砂标题栏和新的文章浏览界面，并修复便携版重复启动后无法导入链接的问题。下载见 [v0.2.4.1 Release](https://github.com/everalone/inspiration-collector/releases/tag/v0.2.4.1)，完整变化见 [版本说明](docs/releases/v0.2.4.1.md)。此前 v0.2.3 / v0.2.4 为本地开发阶段，其功能统一包含在本次发行版中。
+**v2.5.0** 统一按钮、输入框、标签与卡片的组件规格，优化分类卡固定间距，并增加逐条删除失败任务记录。包含此前 v0.2.4.1 的应用内更新、手机收集和 Portable 修复。下载见 [v2.5.0 Release](https://github.com/everalone/inspiration-collector/releases/tag/v2.5.0)，完整变化见 [版本说明](docs/releases/v2.5.0.md)。
 
 ![旧版卡片详情示意](docs/screenshot-detail.png)
 
@@ -22,7 +22,7 @@
 
 - **一键收集**：复制微信公众号文章链接，或在界面粘贴提交，进入后台任务队列；兼容传统图文与新版"图片消息"（轮播图）两种页面格式。
 - **可恢复的任务队列**：手动提交、剪贴板和手机收件箱统一串行处理，分析期间继续复制新链接也会排队；可查看等待、处理、完成和失败状态，失败后可重试。普通未完成任务在重启后继续处理。
-- **清楚的任务状态**：对应收集或重跑后来成功时，先前失败记录从当前列表和失败计数中移除。默认显示最近 10 条已完成任务；「清空已完成记录」只归档任务记录，保留文章、卡片和处理回执。
+- **清楚的任务状态**：对应收集或重跑后来成功时，先前失败记录从当前列表和失败计数中移除。默认显示最近10条已完成任务；「清空已完成记录」归档完成记录，「删除记录」逐条移除失败及其较早尝试，刷新和重启不重新出现。两种操作都保留文章、卡片和处理回执。
 - **应用内更新**：Windows 安装版和便携版自动检查新版本，在最小化按钮左侧下载更新、重启安装；继续使用原数据目录。正在处理任务或确认手机回执时，会提示稍后再安装。
 - **统一标题栏**：品牌、设置、任务、更新和窗口按钮整合为一行，采用圆角和淡色磨砂效果；支持拖动、双击最大化/还原，关闭窗口继续驻留托盘。
 - **保留已有内容**：普通重复收藏跳过提取，保留手动编辑的卡片。显式重跑需确认，成功后整篇替换；抓取、图片下载、模型输出或写库失败时保留旧卡片和原图。
@@ -36,10 +36,10 @@
 
 ## 安装
 
-从 [v0.2.4.1 Release](https://github.com/everalone/inspiration-collector/releases/tag/v0.2.4.1) 下载（Windows x64，安装包未做代码签名；核对下载来源后，可在 SmartScreen 的「更多信息」中选择「仍要运行」）：
+从 [v2.5.0 Release](https://github.com/everalone/inspiration-collector/releases/tag/v2.5.0) 下载（Windows x64，安装包未做代码签名；核对下载来源后，可在 SmartScreen 的「更多信息」中选择「仍要运行」）：
 
-- [InspirationCollector-Portable-0.2.4.1.exe](https://github.com/everalone/inspiration-collector/releases/download/v0.2.4.1/InspirationCollector-Portable-0.2.4.1.exe)：**绿色单文件，双击即用**，无需安装；
-- [InspirationCollector-Setup-0.2.4.1.exe](https://github.com/everalone/inspiration-collector/releases/download/v0.2.4.1/InspirationCollector-Setup-0.2.4.1.exe)：安装版，带开始菜单/桌面快捷方式，可选安装目录。
+- [InspirationCollector-Portable-2.5.0.exe](https://github.com/everalone/inspiration-collector/releases/download/v2.5.0/InspirationCollector-Portable-2.5.0.exe)：**绿色单文件，双击即用**，无需安装；
+- [InspirationCollector-Setup-2.5.0.exe](https://github.com/everalone/inspiration-collector/releases/download/v2.5.0/InspirationCollector-Setup-2.5.0.exe)：安装版，带开始菜单/桌面快捷方式，可选安装目录。
 
 两个版本数据互通（都存 `%AppData%\灵感收集\`）。
 
@@ -87,17 +87,27 @@ npm run dist    # 打包 Setup + Portable（输出到 release/）
 
 `npm run app` 与 `npm run serve` 是两种启动方式，不要同时占用默认端口。开发态默认使用项目根的 `data/`、`assets/`；打包版默认使用 `%AppData%\灵感收集\`，彼此分离。需要隔离测试时可显式设置 `INSPIRATION_DATA_DIR` 指向另一数据目录；应用内配置优先于该数据目录的 `.env` 和进程环境变量。
 
+### 组件与布局规格
+
+**v2.5.0** 汇总本地 v0.2.4.2–v0.2.4.4 已验收的组件同步、分类卡间距和失败记录删除；这些本地阶段不单独公开发布。分类卡从左到右排列，横向8px、换行17px固定间距。见[完整版本说明](docs/releases/v2.5.0.md)。
+
+[组件设计规格说明书](component-spec.md)以2026-11-11确认的Figma组件为设计基线，覆盖尺寸、颜色、文字、状态、组合与布局规则，并标明尚未定义的部分。2026-11-12已同步按钮、输入状态、分类标签、文章/配色卡、分类统计卡、弹窗与画廊；v2.5.0安装包包含这些界面修改。
+
+新规格样式集中在 `viewer/components.css`，加载在既有布局样式之后；尚未定义的键盘、重试、任务和响应式行为继续使用原实现。字体优先使用本机Noto Sans SC，缺少时回退微软雅黑/Segoe UI，不联网加载。隔离视觉验收运行 `node_modules/.bin/electron scripts/verify-components.cjs`，模拟数据截图与尺寸记录写入 `data/ui-check-20261112/`，不访问正式数据库或模型。
+
+[Figma视觉验证原型](https://www.figma.com/design/HfHdEVOq8WrzSG9LOgoN0O?node-id=6-2)保留可点击界面与组件规范两页，包含9个界面/尺寸对照、9个浮层、57个母组件和8个变体集。分类卡靠左和失败记录删除按钮尚待回写，最终实现规则见规格第7.3与11节。
+
 ### 发版（维护者）
 
-在明确决定发布后，推送形如 `v0.2.4.1` 的标签，GitHub Actions 在 Windows 执行类型检查、回归测试、打包、包内容边界、打包运行时以及 Portable 重复启动后的图片加载检查，通过后创建 Release。发布包含 **4 个文件：Setup、Portable、`latest.yml`、`update.json`**；`update.json` 记录安装包版本、下载地址、大小与 SHA-256，供应用检查和校验更新。正文来自对应的 `docs/releases/<标签>.md`。发布记录以 GitHub 实际结果为准。
+在明确决定发布后，推送形如 `v2.5.0` 的标签，GitHub Actions 在 Windows 执行类型检查、回归测试、打包、包内容边界、打包运行时以及 Portable 重复启动后的图片加载检查，通过后创建 Release。发布包含 **4 个文件：Setup、Portable、`latest.yml`、`update.json`**；`update.json` 记录安装包版本、下载地址、大小与 SHA-256，供应用检查和校验更新。正文来自对应的 `docs/releases/<标签>.md`。发布记录以 GitHub 实际结果为准。
 
 四段补丁版本在 npm 中写为合法 SemVer `0.2.4+1`，由 `src-electron/version.mjs` 转为对外的 `0.2.4.1`；`package-lock.json` 同步内部版本，`build.buildVersion` 为外部版本，`build.buildNumber` 为第四段。标签和文件名使用外部版本，CI 校验映射一致。不要用 `npm version` 写入 `+1`（当前 npm 会剥离该部分）。当前 electron-builder 26.15.3 的 `portable.unpackDirName: true` 表示每次启动独立解压；升级构建工具时必须重跑实际 Portable 双启动测试。
 
 ```bash
 # 1. 同步 package.json、package-lock.json 和版本说明，提交并推到 main
 # 2. 打同名标签并推送
-git tag v0.2.4.1
-git push origin v0.2.4.1
+git tag v2.5.0
+git push origin v2.5.0
 ```
 
 ## 使用

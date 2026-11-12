@@ -63,7 +63,10 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       });
     }
     if (p === "/api/tasks") return sendJson(res, 200, { tasks: getTaskQueue().list(), inbox: getInboxStatus() });
-    if (p === "/api/inbox/failed") return sendJson(res, 200, await listInboxFailures());
+    if (p === "/api/inbox/failed") {
+      const failures = await listInboxFailures();
+      return sendJson(res, 200, { ...failures, items: failures.items.filter(item => !getTaskQueue().isInboxFailureArchived(item)) });
+    }
     if (p === "/api/crop") {
       const q = url.searchParams;
       const id = q.get("article") ?? "";
@@ -175,6 +178,11 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     catch (e) { return sendJson(res, 500, { error: redactTaskError(e) }); }
   }
   const taskRetry = p.match(/^\/api\/tasks\/([\w-]+)\/retry$/);
+  const taskRecord = p.match(/^\/api\/tasks\/([\w-]+)$/);
+  if (req.method === "DELETE" && taskRecord) {
+    try { return sendJson(res, 200, getTaskQueue().archiveFailure(taskRecord[1])); }
+    catch (e) { return sendJson(res, 400, { error: redactTaskError(e) }); }
+  }
   if (req.method === "POST" && taskRetry) {
     const task = getTaskQueue().list({ includeArchived: true }).find(t => t.id === taskRetry[1]);
     if (task?.source === "inbox") return sendJson(res, 400, { error: "请从手机收件箱失败列表重新排队" });

@@ -55,6 +55,32 @@ function harness(options = {}) {
 
 const card = (id) => ({ id, article_id: "article", type: "note", title: id, payload: "{}" });
 
+test('each failed task offers record deletion and deleting updates rows and failure count', async () => {
+  const h = harness(); h.add('#tasks-list');
+  const button = h.add('#delete-fixture');
+  h.run(`state.tasks=[{id:'phone',url:'a',source:'inbox',status:'failed'}, {id:'manual',url:'b',status:'failed'}, {id:'busy',url:'c',status:'running'}]; renderTaskStatus();`);
+  const markup = h.elements.get('#tasks-list').innerHTML;
+  assert.equal((markup.match(/data-task-delete=/g) || []).length, 2);
+  assert.doesNotMatch(markup, /data-task-delete="busy"/);
+  const calls = [];
+  h.context.fetch = async (url, options) => { calls.push([url, options?.method]); return response(url === '/api/tasks/phone' ? {archived:3} : {tasks:[]}); };
+  await h.run(`deleteTaskRecord('phone', document.querySelector('#delete-fixture'))`);
+  assert.deepEqual(calls[0], ['/api/tasks/phone', 'DELETE']);
+  assert.doesNotMatch(h.elements.get('#tasks-btn').textContent, /失败/);
+  assert.match(h.elements.get('#tasks-list').innerHTML, /暂无收集任务/);
+  assert.equal(button.disabled, false);
+});
+
+test('failed deletion retains the row and allows another click', async () => {
+  const h = harness(); h.add('#tasks-list'); const button = h.add('#delete-fixture');
+  h.run(`state.tasks=[{id:'failed',url:'a',status:'failed'}]; renderTaskStatus();`);
+  h.context.fetch = async () => response({error:'disk full'}, 500);
+  await h.run(`deleteTaskRecord('failed', document.querySelector('#delete-fixture'))`);
+  assert.match(h.elements.get('#tasks-list').innerHTML, /data-task-delete="failed"/);
+  assert.match(h.elements.get('#toast').textContent, /删除记录失败/);
+  assert.equal(button.disabled, false);
+});
+
 test("failure panel identifies card fields, escapes titles, and stops promising retries at the limit", () => {
   const h = harness();
   h.add('#tasks-list'); h.add('#inbox-failures');

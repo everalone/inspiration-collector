@@ -210,6 +210,7 @@ export function createTaskQueue(options: {
     const task = tasks.find(t => t.id === id);
     if (!task) throw new Error("任务不存在");
     if (task.status !== "failed") return { ...task };
+    if (task.archivedAt) throw new Error("该任务记录已删除，请重新提交链接");
     if (task.resolvedBy) throw new Error("该失败任务已由后续成功处理，无需重试");
     const active = tasks.find(t => t.id !== id && t.url === task.url && t.refresh === task.refresh && ["queued", "running"].includes(t.status));
     if (active) return { ...active };
@@ -246,7 +247,26 @@ export function createTaskQueue(options: {
     catch (error) { for (const task of candidates) delete task.archivedAt; throw error; }
     return { archived: candidates.length };
   };
-  return { enqueue, wait, retry, start, list, archiveCompleted };
+  const archiveFailure = (id: string) => {
+    const target = tasks.find(task => task.id === id);
+    if (!target) throw new Error("任务不存在");
+    if (target.status !== "failed") throw new Error("只能删除失败任务记录，进行中的任务不能删除");
+    if (target.archivedAt) return { archived: 0 };
+    // The visible row collapses older attempts for this URL and operation.
+    // Archive them together so deleting the row cannot reveal an older failure.
+    const recent = ordered().map(({ task }) => task);
+    const candidates = recent.slice(0, recent.indexOf(target) + 1).filter(task =>
+      task.status === "failed" && !task.archivedAt && task.url === target.url && task.refresh === target.refresh);
+    const now = new Date().toISOString();
+    for (const task of candidates) task.archivedAt = now;
+    try { persist(); }
+    catch (error) { for (const task of candidates) delete task.archivedAt; throw error; }
+    return { archived: candidates.length };
+  };
+  const isInboxFailureArchived = (item: { id: string; generation?: string; attempts: number }) => tasks.some(task =>
+    task.status === "failed" && task.archivedAt && task.inbox?.id === item.id &&
+    task.inbox.generation === item.generation && task.inbox.attempt >= item.attempts);
+  return { enqueue, wait, retry, start, list, archiveCompleted, archiveFailure, isInboxFailureArchived };
 }
 
 let sharedQueue: ReturnType<typeof createTaskQueue> | undefined;

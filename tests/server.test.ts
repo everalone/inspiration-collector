@@ -163,4 +163,11 @@ test('deleting an article with an active refresh is refused instead of restoring
     await outcome;
     globalThis.fetch = originalFetch;
   }
+  const deleted = await fetch(`${base}/api/tasks/${task.id}`, { method: 'DELETE' });
+  assert.equal(deleted.status, 200);
+  const visible = await (await fetch(`${base}/api/tasks`)).json() as any;
+  assert.equal(visible.tasks.some((row: any) => row.id === task.id), false);
+  assert.equal(store.countItems(), 603);
+  assert.ok(store.getArticle('existing'));
+  assert.equal((await fetch(`${base}/api/tasks/missing`, { method: 'DELETE' })).status, 400);
 });
