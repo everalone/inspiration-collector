@@ -23,11 +23,11 @@ let remoteFailures = [];
 let remoteFailureMessage = "";
 let settingsRequest = 0;
 
-function toast(msg) {
+function toast(msg, duration = 1600) {
   toastEl.textContent = msg;
   toastEl.classList.remove("hidden");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toastEl.classList.add("hidden"), 1600);
+  toastTimer = setTimeout(() => toastEl.classList.add("hidden"), duration);
 }
 
 async function copyText(text, label) {
@@ -275,19 +275,38 @@ async function selectTopTab(key) {
   state.items = [];
   renderTabs(); renderDetail();
   $("#list").scrollTop = 0;
+  const requestedType = state.type, requestedVerify = state.verify;
   await loadItems();
+  if (state.type === requestedType && state.verify === requestedVerify &&
+      (state.type !== "all" || state.verify) && !state.articleScopeId &&
+      !state.itemError && visibleArticles().length) {
+    toast("单击预览卡片，双击可进入", 3000);
+  }
 }
 
 async function selectArticle(id) {
   if (!findArticle(id)) return;
   state.keepArticleOverview = false;
+  state.articleScopeId = null;
   state.selectedArticleId = id;
   state.selectedId = null;
-  if (state.type !== "all" || state.verify) {
-    state.articleScopeId = id;
-    $("#list").scrollTop = 0;
-    await loadItems();
-  } else { renderList(); renderDetail(); }
+  // Keep the clicked DOM node alive so the second click can produce dblclick.
+  for (const card of document.querySelectorAll("[data-select-article]")) {
+    const selected = card.dataset.selectArticle === id;
+    card.classList.toggle("selected", selected);
+    card.setAttribute("aria-pressed", String(selected));
+  }
+  renderDetail();
+}
+
+async function enterFilteredArticle(id) {
+  if (!findArticle(id) || state.articleScopeId || (state.type === "all" && !state.verify)) return;
+  state.keepArticleOverview = false;
+  state.articleScopeId = id;
+  state.selectedArticleId = id;
+  state.selectedId = null;
+  $("#list").scrollTop = 0;
+  await loadItems();
 }
 
 async function enterArticleType(articleId, type) {
@@ -720,6 +739,17 @@ function displayTime(value) {
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour12: false });
 }
 
+function taskDetailsHtml(task) {
+  const report = task.failureReport ? failureReportHtml(task.failureReport) : task.error ? `<div class="task-error">${esc(errorText(task.error))}</div>` : "";
+  const attempt = inboxAttemptText(task);
+  const attemptHtml = attempt ? `<div class="task-meta">${esc(attempt)}</div>` : "";
+  if (task.status !== "failed") return report + attemptHtml;
+  // Phone failures end with attempt guidance; manual failures end with their report.
+  const phone = task.source === "inbox";
+  return `${phone ? report : ""}<div class="task-record-footer"><div class="task-record-message">${phone ? attemptHtml : report + attemptHtml}</div>
+    <div class="task-record-actions">${!phone ? `<button class="mini-btn" type="button" data-task-retry="${esc(task.id)}">重试</button>` : ""}<button class="mini-btn danger" type="button" data-task-delete="${esc(task.id)}" title="仅删除任务记录，保留文章和卡片">删除记录</button></div></div>`;
+}
+
 function renderTaskStatus() {
   const tasks = visibleTasks();
   const active = tasks.filter((task) => task.status === "queued" || task.status === "running").length;
@@ -750,9 +780,7 @@ function renderTaskStatus() {
     (tasks.map((task) => `<div class="task-row">
       <div class="task-info"><div class="task-title">${esc(task.title || task.url || "收集任务")}</div>
       <div class="task-meta"><span class="task-state ${esc(task.status)}">${esc(TASK_LABEL[task.status] || "状态未知")}</span>${task.result?.skipped ? " · 已收藏，未重复分析" : ""}${task.source === "inbox" ? " · 手机收集" : ""}${task.updatedAt ? " · " + esc(displayTime(task.updatedAt)) : ""}</div>
-      ${task.failureReport ? failureReportHtml(task.failureReport) : task.error ? `<div class="task-error">${esc(errorText(task.error))}</div>` : ""}
-      ${inboxAttemptText(task) ? `<div class="task-meta">${esc(inboxAttemptText(task))}</div>` : ""}</div>
-      ${task.status === "failed" ? `<div class="task-record-actions">${task.source !== "inbox" ? `<button class="mini-btn" type="button" data-task-retry="${esc(task.id)}">重试</button>` : ""}<button class="mini-btn danger" type="button" data-task-delete="${esc(task.id)}" title="仅删除任务记录，保留文章和卡片">删除记录</button></div>` : ""}
+      ${taskDetailsHtml(task)}</div>
     </div>`).join("") || `<div class="task-empty">暂无收集任务</div>`);
   const inbox = state.inbox;
   const connection = $("#inbox-status");
@@ -1055,6 +1083,10 @@ async function deleteItem(id, fromModal = false) {
 }
 
 /* ---------- 事件 ---------- */
+document.addEventListener("dblclick", async (e) => {
+  const card = e.target.closest("[data-select-article]");
+  if (card) { e.preventDefault(); await enterFilteredArticle(card.dataset.selectArticle); }
+});
 document.addEventListener("click", async (e) => {
   const t = e.target;
 

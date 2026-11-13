@@ -1,6 +1,6 @@
 {
   "name": "inspiration-collector",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "private": true,
   "type": "module",
   "main": "src-electron/main.mjs",
@@ -14,7 +14,7 @@
     "serve": "tsx cli.ts serve"
   },
   "build": {
-    "buildVersion": "2.5.0",
+    "buildVersion": "2.5.1",
     "buildNumber": "0",
     "appId": "com.p016.inspiration-collector",
     "productName": "灵感收集",

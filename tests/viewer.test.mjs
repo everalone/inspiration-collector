@@ -405,14 +405,22 @@ test('all starts with only parent cards and an article overview with author, imp
   assert.doesNotMatch(h.elements.get('#list').innerHTML, /data-id=/);
 });
 
-test('top type tabs show parents first; choosing a parent scopes children and back preserves that type', async () => {
+test('top type tabs keep parents on single click and scope children on double click', async () => {
   const h = navigationFixture();
   await h.run(`selectTopTab('note')`);
   assert.equal(h.run('state.articleScopeId'), null);
+  assert.equal(h.elements.get('#toast').textContent, '单击预览卡片，双击可进入');
   let list = h.elements.get('#list').innerHTML;
   assert.equal((list.match(/data-select-article=/g) || []).length, 2);
   assert.doesNotMatch(list, /data-id=|data-article="empty"/);
   await h.run(`selectArticle('hierarchy')`);
+  assert.equal(h.run('state.articleScopeId'), null);
+  assert.equal(h.run('state.selectedId'), null);
+  assert.equal(h.run('state.selectedArticleId'), 'hierarchy');
+  assert.equal(h.elements.get('#list').innerHTML, list, 'preview must preserve DOM for native dblclick');
+  assert.match(h.elements.get('#detail').innerHTML, /article-overview/);
+  assert.ok(!h.calls.some(path => path.includes('articleId=hierarchy')));
+  await h.documentEvents.get('dblclick')({target:{closest:()=>({dataset:{selectArticle:'hierarchy'}})},preventDefault(){}});
   assert.equal(h.run('state.articleScopeId'), 'hierarchy');
   assert.equal(h.run('state.selectedId'), 'hierarchy-note');
   list = h.elements.get('#list').innerHTML;

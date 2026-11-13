@@ -6,14 +6,14 @@ const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');
-const out = path.join(root, 'data/ui-check-20261112');
+const out = path.join(root, 'data/ui-check-20261113');
 fs.mkdirSync(out, { recursive: true });
 app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'p016-components-')));
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('force-device-scale-factor', '1');
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ width: 1440, height: 960, useContentSize: true, show: false,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
+    webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true } });
   win.webContents.on('console-message', event => console.log(event.message));
   win.webContents.session.webRequest.onBeforeRequest((details, callback) => callback({ cancel: !details.url.startsWith('file:') && !details.url.startsWith('data:') }));
   let html = fs.readFileSync(path.join(root, 'viewer/index.html'), 'utf8')
@@ -70,6 +70,39 @@ app.whenReady().then(async () => {
     })()`);
     assert.equal(sparse.gap,8); assert.equal(sparse.left,0);
   }
+  // Use Chromium mouse events: replacing the node on the first click breaks native dblclick.
+  const parentBox = await win.webContents.executeJavaScript(`(async()=>{
+    window.navigationItems=[{id:'palette-one',article_id:'sample',type:'palette',title:'配色一',payload:JSON.stringify({colors:[{hex:'#6FAEE0'}]})},
+      {id:'note-one',article_id:'sample',type:'note',title:'笔记一',payload:JSON.stringify({sections:[]})}];
+    window.fetch=async url=>({ok:true,json:async()=>{
+      const u=new URL(url,'http://fixture');
+      if(u.pathname==='/api/items'){const items=window.navigationItems.filter(i=>(!u.searchParams.get('type')||i.type===u.searchParams.get('type'))&&(!u.searchParams.get('articleId')||i.article_id===u.searchParams.get('articleId')));return {items,total:items.length};}
+      if(u.pathname==='/api/article-images')return {images:[]};
+      return {tasks:[],items:[]};
+    }});
+    await selectTopTab('palette');
+    window.previewCard=document.querySelector('[data-select-article]');
+    return window.previewCard.getBoundingClientRect().toJSON();
+  })()`);
+  await new Promise(r=>setTimeout(r,240));
+  const hint=await win.webContents.executeJavaScript(`(()=>{const t=document.querySelector('#toast'),c=getComputedStyle(t);return {text:t.textContent,opacity:c.opacity,background:c.backgroundColor,shadow:c.boxShadow,font:c.fontSize,line:c.lineHeight,transition:c.transitionDuration,pointer:c.pointerEvents};})()`);
+  assert.equal(hint.text,'单击预览卡片，双击可进入');assert.equal(hint.opacity,'1');assert.equal(hint.background,'rgb(36, 62, 80)');assert.equal(hint.shadow,'none');assert.equal(hint.font,'13px');assert.equal(hint.pointer,'none');
+  await win.webContents.capturePage();
+  fs.writeFileSync(path.join(out,'category-hint-980.png'),(await win.webContents.capturePage()).toPNG());
+  const point={x:Math.round(parentBox.x+100),y:Math.round(parentBox.y+50),button:'left'};
+  win.webContents.sendInputEvent({type:'mouseDown',...point,clickCount:1});
+  win.webContents.sendInputEvent({type:'mouseUp',...point,clickCount:1});
+  await new Promise(r=>setTimeout(r,40));
+  const preview=await win.webContents.executeJavaScript(`({scope:state.articleScopeId,sameNode:window.previewCard===document.querySelector('[data-select-article]'),overview:!!document.querySelector('.article-overview')})`);
+  assert.equal(preview.scope,null);assert.equal(preview.sameNode,true);assert.equal(preview.overview,true);
+  win.webContents.sendInputEvent({type:'mouseDown',...point,clickCount:2});
+  win.webContents.sendInputEvent({type:'mouseUp',...point,clickCount:2});
+  await new Promise(r=>setTimeout(r,100));
+  const entered=await win.webContents.executeJavaScript(`({scope:state.articleScopeId,ids:[...document.querySelectorAll('.li')].map(e=>e.dataset.id),parents:document.querySelectorAll('[data-select-article]').length})`);
+  assert.equal(entered.scope,'sample');assert.deepEqual(entered.ids,['palette-one']);assert.equal(entered.parents,0);
+  const fade=await win.webContents.executeJavaScript(`(async()=>{toast('单击预览卡片，双击可进入',260);await new Promise(r=>setTimeout(r,320));const midway=Number(getComputedStyle(toastEl).opacity);await new Promise(r=>setTimeout(r,220));return {midway,opacity:getComputedStyle(toastEl).opacity,visibility:getComputedStyle(toastEl).visibility,classes:toastEl.className,text:toastEl.textContent,animations:toastEl.getAnimations().map(a=>({time:a.currentTime,state:a.playState}))};})()`);
+  assert.ok(fade.midway>0&&fade.midway<1, JSON.stringify({fade,hint}));assert.equal(fade.opacity,'0');assert.equal(fade.visibility,'hidden');
+  fs.writeFileSync(path.join(out,'navigation-check.json'),JSON.stringify({preview,entered,hint,fade},null,2));
   await win.webContents.executeJavaScript(`state.items=[{id:1,article_id:'sample',type:'palette',title:'海岸线的五种蓝',payload:JSON.stringify({colors:['#173D57','#6FAEE0','#C6E4F5','#F7F1C8','#F3F8FB'].map(hex=>({hex}))}) }];state.selectedId=1;document.querySelector('#list').innerHTML=itemHtml(state.items[0]);openEditModal(1);`);
   const edit = await win.webContents.executeJavaScript(`(() => {const m=document.querySelector('.modal');m.scrollTop=m.scrollHeight;const b=document.querySelector('#m-save').getBoundingClientRect();return {modal:m.getBoundingClientRect().toJSON(),save:b.toJSON(),scroll:m.scrollHeight>m.clientHeight};})()`);
   assert.ok(edit.save.bottom<=640); assert.equal(edit.modal.width,560);
@@ -102,14 +135,16 @@ app.whenReady().then(async () => {
   })()`);
   const taskActions = await win.webContents.executeJavaScript(`(()=>{
     const buttons=[...document.querySelectorAll('[data-task-delete]')];
-    return buttons.map(b=>{const rect=b.getBoundingClientRect(),row=b.closest('.task-row'),info=row.querySelector('.task-info').getBoundingClientRect();return {width:rect.width,height:rect.height,below:rect.top>=info.bottom,right:Math.abs(rect.right-row.getBoundingClientRect().right),visible:rect.top>=0&&rect.bottom<=innerHeight&&!document.querySelector('#modal').classList.contains('hidden')};});
+    return buttons.map(b=>{const rect=b.getBoundingClientRect(),row=b.closest('.task-row'),message=row.querySelector('.task-record-message').getBoundingClientRect(),style=getComputedStyle(b);return {width:rect.width,height:rect.height,bottomGap:Math.abs(rect.bottom-message.bottom),noOverlap:message.right<=b.parentElement.getBoundingClientRect().left,right:Math.abs(rect.right-row.getBoundingClientRect().right),font:style.fontSize,radius:style.borderRadius,visible:rect.top>=0&&rect.bottom<=innerHeight&&!document.querySelector('#modal').classList.contains('hidden')};});
   })()`);
   assert.equal(taskActions.length,2);
-  for(const action of taskActions) {assert.ok(action.below);assert.ok(action.visible);assert.ok(action.right<1);assert.equal(action.height,32);}
+  for(const action of taskActions) {assert.ok(action.noOverlap);assert.ok(action.bottomGap<1);assert.ok(action.visible);assert.ok(action.right<1);assert.equal(action.height,24);assert.equal(action.width,64);assert.equal(action.font,'10px');assert.equal(action.radius,'8px');}
   // A hidden window may retain the previous compositor frame until captured.
   await win.webContents.capturePage();
   await new Promise(resolve=>setTimeout(resolve,150));
   fs.writeFileSync(path.join(out,'task-delete-980.png'),(await win.webContents.capturePage()).toPNG());
+  const longReport=await win.webContents.executeJavaScript(`(()=>{window.failedFixture[1].error='长错误报告字段说明与处理建议'.repeat(24);renderTaskStatus();const row=document.querySelector('[data-task-delete="failed-manual"]').closest('.task-row'),m=row.querySelector('.task-record-message'),a=row.querySelector('.task-record-actions'),mr=m.getBoundingClientRect(),ar=a.getBoundingClientRect();return {height:mr.height,noOverlap:mr.right<=ar.left,contained:m.scrollWidth<=m.clientWidth,bottom:Math.abs(mr.bottom-ar.bottom)};})()`);
+  assert.ok(longReport.height>24);assert.ok(longReport.noOverlap);assert.ok(longReport.contained);assert.ok(longReport.bottom<1);
   const deleted = await win.webContents.executeJavaScript(`(async()=>{
     const b=document.querySelector('[data-task-delete="failed-phone"]');b.click();b.click();
     const pending=b.disabled;
@@ -117,7 +152,7 @@ app.whenReady().then(async () => {
     return {pending,calls:window.deleteCalls,left:document.querySelectorAll('[data-task-delete]').length,label:document.querySelector('#tasks-btn').textContent};
   })()`);
   assert.equal(deleted.pending,true);assert.equal(deleted.calls,1);assert.equal(deleted.left,1);assert.match(deleted.label,/1 条失败/);
-  fs.writeFileSync(path.join(out,'task-delete-check.json'),JSON.stringify({taskActions,deleted},null,2));
+  fs.writeFileSync(path.join(out,'task-delete-check.json'),JSON.stringify({taskActions,longReport,deleted},null,2));
   fs.writeFileSync(path.join(out,'measurements.json'),JSON.stringify({results,edit},null,2));
   console.log('Component geometry and scroll checks passed');
   win.destroy(); app.quit();
