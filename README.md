@@ -2,7 +2,7 @@
 
 把值得留存的微信公众号文章链接丢进来，自动抓取并用视觉大模型把内容**拆解成一张张"可复制的灵感卡片"**——配色（含色值）、网址、GitHub 项目、提示词、方法论笔记——形成可检索、可校验、可持续积累的本地灵感库。
 
-**v2.6.0（本地构建，尚未发布）** 新增暖纸编辑、液态玻璃、冷灰专业三套可选主题，明暗跟随系统，并重排顶栏、列表与详情布局。变化见 [v2.6.0 版本说明](docs/releases/v2.6.0.md)；公开下载目前仍为 v2.5.1。
+**v2.6.0** 新增暖纸编辑、液态玻璃、冷灰专业三套可选主题，明暗跟随系统，并重排顶栏、列表与详情布局。下载见 [v2.6.0 Release](https://github.com/everalone/inspiration-collector/releases/tag/v2.6.0)，完整变化见 [版本说明](docs/releases/v2.6.0.md)。
 
 **v2.5.1** 优化失败任务的紧凑操作布局，顶部分类中的文章支持单击预览、双击进入，并增加淡入淡出的操作提示。保留 v2.5.0 的统一组件规格、失败记录删除及应用内更新。下载见 [v2.5.1 Release](https://github.com/everalone/inspiration-collector/releases/tag/v2.5.1)，完整变化见 [版本说明](docs/releases/v2.5.1.md)。
 
@@ -38,10 +38,10 @@
 
 ## 安装
 
-从 [v2.5.1 Release](https://github.com/everalone/inspiration-collector/releases/tag/v2.5.1) 下载（Windows x64，安装包未做代码签名；核对下载来源后，可在 SmartScreen 的「更多信息」中选择「仍要运行」）：
+从 [v2.6.0 Release](https://github.com/everalone/inspiration-collector/releases/tag/v2.6.0) 下载（Windows x64，安装包未做代码签名；核对下载来源后，可在 SmartScreen 的「更多信息」中选择「仍要运行」）：
 
-- [InspirationCollector-Portable-2.5.1.exe](https://github.com/everalone/inspiration-collector/releases/download/v2.5.1/InspirationCollector-Portable-2.5.1.exe)：**绿色单文件，双击即用**，无需安装；
-- [InspirationCollector-Setup-2.5.1.exe](https://github.com/everalone/inspiration-collector/releases/download/v2.5.1/InspirationCollector-Setup-2.5.1.exe)：安装版，带开始菜单/桌面快捷方式，可选安装目录。
+- [InspirationCollector-Portable-2.6.0.exe](https://github.com/everalone/inspiration-collector/releases/download/v2.6.0/InspirationCollector-Portable-2.6.0.exe)：**绿色单文件，双击即用**，无需安装；
+- [InspirationCollector-Setup-2.6.0.exe](https://github.com/everalone/inspiration-collector/releases/download/v2.6.0/InspirationCollector-Setup-2.6.0.exe)：安装版，带开始菜单/桌面快捷方式，可选安装目录。
 
 两个版本数据互通（都存 `%AppData%\灵感收集\`）。
 
