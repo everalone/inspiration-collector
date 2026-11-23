@@ -11,6 +11,8 @@ let gallery = { files: [], idx: 0, busy: false };
 let detailRevision = 0;
 let galleryTimer = null;
 let detailResizeObserver = null;
+let listSignature = "";
+let listAnimTimer = null;
 
 const $ = (sel) => document.querySelector(sel);
 const toastEl = $("#toast");
@@ -195,7 +197,7 @@ function itemHtml(item) {
       <span class="badge t-${item.type}">${TYPE_LABEL[item.type] ?? item.type}</span>
       <span class="li-title" title="${esc(item.title)}">${esc(item.title)}</span>
       ${item.verify_status === "unsure" ? '<span class="warn-badge">待核对</span>' : ""}
-      ${item.verify_status === "dead" ? '<span class="warn-badge" style="color:#dc2626;border-color:#fecaca">已失效</span>' : ""}
+      ${item.verify_status === "dead" ? '<span class="warn-badge dead">已失效</span>' : ""}
     </div>
     <div class="li-body">${listPreview(item, payload)}</div>
     <div class="li-foot">
@@ -239,6 +241,14 @@ function renderList() {
     ? `<div class="list-status" role="status">正在加载卡片…</div>`
     : state.itemError ? `<div class="list-status load-error" role="status">${esc(state.itemError)} <button class="mini-btn" data-reload-items>重新加载</button></div>` : "";
   const list = $("#list");
+  // Animate only when the browsing context changes, not on every paged batch.
+  const signature = [state.articleScopeId, state.type, state.verify, state.q].join("|");
+  if (signature !== listSignature) {
+    listSignature = signature;
+    clearTimeout(listAnimTimer);
+    list.classList.add("is-entering");
+    listAnimTimer = setTimeout(() => list.classList.remove("is-entering"), 460);
+  }
   if (state.articleScopeId) {
     const article = findArticle(state.articleScopeId);
     const children = state.items.filter(item => item.article_id === state.articleScopeId &&
@@ -350,6 +360,12 @@ function renderDetail() {
   if (state.articleScopeId && selectedItem()) renderItemDetail(revision);
   else if (state.selectedArticleId && findArticle(state.selectedArticleId)) renderArticleDetail(findArticle(state.selectedArticleId), revision);
   else el.innerHTML = '<div class="empty welcome-empty"><span class="welcome-mark" aria-hidden="true">✦</span><h2>让灵感，有处可寻</h2><p>选择左侧文章，查看总结、分类卡片与原文。</p></div>';
+  const first = el.firstElementChild;
+  if (first) {
+    first.classList.remove("view-enter");
+    void first.offsetWidth;
+    first.classList.add("view-enter");
+  }
   observeDetailSize();
   updateReadingProgress();
 }
@@ -381,7 +397,7 @@ function renderItemDetail(revision) {
       <span class="badge t-${item.type}">${TYPE_LABEL[item.type] ?? item.type}</span>
       <h2>${esc(item.title)}</h2>
       ${item.verify_status === "unsure" ? '<span class="warn-badge">待核对</span>' : ""}
-      ${item.verify_status === "dead" ? '<span class="warn-badge" style="color:#dc2626;border-color:#fecaca">已失效</span>' : ""}
+      ${item.verify_status === "dead" ? '<span class="warn-badge dead">已失效</span>' : ""}
     </div><hr class="d-hr">`;
   const source = item.article
     ? `<div class="d-foot"><span>来源：</span><a href="${esc(item.article.url)}" target="_blank" rel="noopener">${esc(item.article.title)}（${esc(item.article.account)}）</a>
@@ -631,7 +647,15 @@ function openSettings(section) {
         .join("");
       modal.innerHTML = `<div class="modal">
       <h3>⚙ 设置 · 模型服务</h3>
-      <label>API Key ${c.keyMasked ? `（当前 ${esc(c.keyMasked)}）` : "（必填）"}</label>
+      <h3 style="margin-top:18px">外观</h3>
+      <div class="theme-choice" role="radiogroup" aria-label="界面主题">
+        <button type="button" class="theme-card" data-skin-choice="paper"><span class="theme-swatch" data-skin="paper"></span>暖纸编辑</button>
+        <button type="button" class="theme-card" data-skin-choice="glass"><span class="theme-swatch" data-skin="glass"></span>液态玻璃</button>
+        <button type="button" class="theme-card" data-skin-choice="slate"><span class="theme-swatch" data-skin="slate"></span>冷灰专业</button>
+      </div>
+      <label for="s-ui-mode">明暗</label>
+      <select id="s-ui-mode"><option value="auto">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select>
+      <label>API Key ${c.keyMasked ? `（当前 ${c.keyMasked}）` : "（必填）"}</label>
       <input type="password" id="s-key" placeholder="sk-…" value="">
       <label>Base URL</label>
       <input type="text" id="s-base" value="${esc(c.baseUrl ?? "")}">
@@ -669,6 +693,20 @@ function openSettings(section) {
       </div>
     </div>`;
       modal.classList.remove("hidden");
+      const ui = window.getUiTheme ? window.getUiTheme() : { skin: "paper", mode: "auto" };
+      modal.querySelectorAll("[data-skin-choice]").forEach(btn => {
+        btn.setAttribute("aria-pressed", String(btn.dataset.skinChoice === ui.skin));
+        btn.onclick = () => {
+          window.setUiTheme?.({ skin: btn.dataset.skinChoice });
+          modal.querySelectorAll("[data-skin-choice]").forEach(other =>
+            other.setAttribute("aria-pressed", String(other === btn)));
+        };
+      });
+      const modeSelect = $("#s-ui-mode");
+      if (modeSelect) {
+        modeSelect.value = ui.mode === "light" || ui.mode === "dark" ? ui.mode : "auto";
+        modeSelect.onchange = () => window.setUiTheme?.({ mode: modeSelect.value === "auto" ? null : modeSelect.value });
+      }
       $("#s-cancel").onclick = closeModal;
       $("#s-save").onclick = saveSettings;
       $("#rep-select-all").onclick = () => {
@@ -1189,19 +1227,38 @@ let galleryPointer = null;
 let suppressGalleryClick = false;
 $("#detail").addEventListener("pointerdown", e => {
   if (!e.target.closest?.(".gallery-viewport") || e.button > 0) return;
-  galleryPointer = { id: e.pointerId, x: e.clientX, y: e.clientY };
+  const slide = e.target.closest(".gallery-viewport")?.querySelector(".gallery-slide:not(.is-outgoing)");
+  galleryPointer = { id: e.pointerId, x: e.clientX, y: e.clientY, slide };
   suppressGalleryClick = false;
+});
+document.addEventListener("pointermove", e => {
+  if (!galleryPointer || galleryPointer.id !== e.pointerId) return;
+  const dx = e.clientX - galleryPointer.x;
+  const dy = e.clientY - galleryPointer.y;
+  if (Math.abs(dx) <= Math.abs(dy) * 1.2) return;
+  galleryPointer.moved = true;
+  galleryPointer.slide?.classList.add("is-dragging");
+  galleryPointer.slide?.style.setProperty("--drag", `${Math.round(dx * 0.55)}px`);
 });
 document.addEventListener("pointerup", e => {
   if (!galleryPointer || galleryPointer.id !== e.pointerId) return;
   const dx = e.clientX - galleryPointer.x, dy = e.clientY - galleryPointer.y;
+  const slide = galleryPointer.slide;
   galleryPointer = null;
+  if (slide) {
+    slide.classList.remove("is-dragging");
+    slide.style.removeProperty("--drag");
+  }
   if (Math.abs(dx) < 45 || Math.abs(dx) < Math.abs(dy) * 1.3) return;
   suppressGalleryClick = true;
   galleryMove(dx < 0 ? 1 : -1);
   setTimeout(() => { suppressGalleryClick = false; }, 0);
 });
-document.addEventListener("pointercancel", () => { galleryPointer = null; });
+document.addEventListener("pointercancel", () => {
+  galleryPointer?.slide?.classList.remove("is-dragging");
+  galleryPointer?.slide?.style.removeProperty("--drag");
+  galleryPointer = null;
+});
 $("#detail").addEventListener("scroll", updateReadingProgress, { passive: true });
 $("#detail").addEventListener("load", updateReadingProgress, true);
 window.addEventListener("resize", updateReadingProgress);

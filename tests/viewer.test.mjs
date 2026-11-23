@@ -699,7 +699,7 @@ test('without an API key startup still loads saved articles, opens settings, and
   const calls = [];
   const article = {id:'saved',title:'本机已保存文章',account:'示例作者',itemCount:0,typeCounts:{note:0}};
   const h = harness({
-    selectors: ['.stat', '#s-cancel', '#s-save', '#s-key', '#rep-select-all', '#rep-run', '#tasks-refresh', '#tasks-archive', '#tasks-list'],
+    selectors: ['.stat', '#s-cancel', '#s-save', '#s-key', '#s-ui-mode', '#rep-select-all', '#rep-run', '#tasks-refresh', '#tasks-archive', '#tasks-list'],
     fetch: async (path, options) => {
       calls.push([path, options?.method || 'GET']);
       if (path === '/api/bootstrap') return response({articles:[article],typeCounts:{note:0},articleCount:1,unsureCount:0});
