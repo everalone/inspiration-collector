@@ -11,3 +11,18 @@ STATE.md
 *.log
 .DS_Store
 Thumbs.db
+
+# Electron/Chromium 运行时配置（本机冒烟启动会写在工作目录）
+/Cache/
+/Code Cache/
+/GPUCache/
+/DawnGraphiteCache/
+/DawnWebGPUCache/
+/Shared Dictionary/
+/Local Storage/
+/Session Storage/
+/Network/
+/Local State
+/Preferences
+/DIPS
+/declarative_performance_observer.db*
