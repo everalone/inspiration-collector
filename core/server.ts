@@ -7,6 +7,7 @@ import { startInboxPoller, stopInboxPoller, getInboxStatus, listInboxFailures, r
 import { getTaskQueue, runCollection, runReprocess, normalizeArticleUrl, redactTaskError } from "./tasks.js";
 import { getArticleImageFiles, getArticleImagesDir, getArticleImageUrl } from "./article-images.js";
 import { articleIdFromUrl } from "./parse.js";
+import { cropRect } from "./crop.js";
 
 // viewer 静态目录：开发态在项目根；打包态在应用根（asar），由主进程通过环境变量注入
 const VIEWER_DIR = process.env.INSPIRATION_APP_ROOT
@@ -80,15 +81,19 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
         return sendJson(res, 404, { error: "crop source not found" });
       }
       const { default: sharp } = await import("sharp");
-      const img = sharp(path.join(dir, file));
-      const meta = await img.metadata();
-      const W = meta.width ?? 0, H = meta.height ?? 0;
+      // Auto-orient first: the model sees a rotated copy, so crop in the same orientation.
+      let oriented: Buffer, W = 0, H = 0;
+      try {
+        const result = await sharp(path.join(dir, file)).rotate().toBuffer({ resolveWithObject: true });
+        oriented = result.data;
+        W = result.info.width ?? 0;
+        H = result.info.height ?? 0;
+      } catch {
+        return sendJson(res, 404, { error: "unreadable image" });
+      }
       if (!W || !H) return sendJson(res, 404, { error: "unreadable image" });
-      const left = Math.max(0, Math.min(W - 10, Math.round((box[0] / 1000) * W)));
-      const top = Math.max(0, Math.min(H - 10, Math.round((box[1] / 1000) * H)));
-      const width = Math.max(10, Math.min(W - left, Math.round(((box[2] - box[0]) / 1000) * W)));
-      const height = Math.max(10, Math.min(H - top, Math.round(((box[3] - box[1]) / 1000) * H)));
-      const buf = await img.extract({ left, top, width, height }).jpeg({ quality: 86 }).toBuffer();
+      const { left, top, width, height } = cropRect(box, W, H);
+      const buf = await sharp(oriented).extract({ left, top, width, height }).jpeg({ quality: 88 }).toBuffer();
       res.writeHead(200, { "Content-Type": "image/jpeg", "Cache-Control": "no-cache" });
       res.end(buf);
       return true;

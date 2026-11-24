@@ -295,7 +295,7 @@ nav#tabs::-webkit-scrollbar { display: none; }
 }
 .type-summary-card {
   position: relative; width: auto; height: auto; min-height: 0; flex: none;
-  display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; gap: 6px;
+  display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 6px;
   border: 1px solid var(--type-border); border-radius: var(--radius-m); padding: 13px 15px;
   background: var(--type-bg); color: var(--type-ink); text-align: left; box-shadow: none;
   transition: transform var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease), border-color var(--dur-2) var(--ease);
@@ -305,8 +305,13 @@ nav#tabs::-webkit-scrollbar { display: none; }
 .type-summary-card .type-label { font: 600 12px/1.4 var(--font-ui); letter-spacing: .01em; padding: 0; }
 .type-summary-card .type-count, .type-summary-card strong { font: 600 25px/1.15 var(--font-ui); letter-spacing: -.02em; white-space: nowrap; }
 .type-summary-card .type-unit { font: 400 11px/1 var(--font-ui); margin-left: 4px; letter-spacing: 0; opacity: .75; }
-.type-card-arrow { position: absolute; top: 12px; right: 13px; font: 400 14px/1 var(--font-ui); opacity: .45; transition: transform var(--dur-2) var(--ease), opacity var(--dur-2) var(--ease); }
-.type-summary-card:hover .type-card-arrow { transform: translate(1px, -1px); opacity: .9; }
+.type-card-arrow {
+  position: absolute; top: 50%; right: 14px; z-index: 1;
+  transform: translateY(-50%);
+  font: 400 16px/1 var(--font-ui); opacity: .5;
+  transition: transform var(--dur-2) var(--ease), opacity var(--dur-2) var(--ease);
+}
+.type-summary-card:hover .type-card-arrow { transform: translate(2px, -50%); opacity: .9; }
 
 .article-overview > .article-summary, .detail-summary {
   font: 400 14px/1.9 var(--font-ui); color: var(--ink-2); margin: 0 0 22px; max-width: 68ch;
@@ -351,7 +356,7 @@ nav#tabs::-webkit-scrollbar { display: none; }
 .note-section ul { margin: 0; padding-left: 19px; color: var(--ink-2); font-size: 13.5px; line-height: 1.9; }
 .note-section li + li { margin-top: 4px; }
 
-.detail-img { max-width: min(720px, 100%); border: 1px solid var(--line); border-radius: var(--radius-m); margin-top: 18px; cursor: zoom-in; display: block; }
+.detail-img { max-width: min(720px, 100%); border: 1px solid var(--line); border-radius: var(--radius-m); margin: 18px auto 0; cursor: zoom-in; display: block; }
 .d-foot {
   margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line);
   font-size: 12px; color: var(--ink-3); display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
